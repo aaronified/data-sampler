@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.0.1 — 2026-07-19
+
+- **Fixed the bundled name library.** The v3.0.0 library contained invented
+  non-name strings (e.g. "Argon", "Ardwin"), so the `names` anonymizer could
+  produce gibberish. Replaced with a curated list of 200 first, 60 middle,
+  and 220 last real names, globally diverse.
+- **Added a bundled example dataset** (`examples/employees.csv`, 1,000 rows,
+  stratifiable) and a worked example section in the README covering the
+  TUI, the Python API, and the CLI.
+
 ## v3.0 — 2026-07-19
 
 ### Package restructure

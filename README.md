@@ -109,6 +109,92 @@ anon = ds.anonymize(
 ds.save_output(anon, "data.xlsx", tag="sample_500_anon")
 ```
 
+## Try it: bundled example
+
+The repo ships a 1,000-row dummy dataset, [examples/employees.csv](examples/employees.csv),
+built to be stratifiable: `department`, `region`, and `employment_type` have
+skewed categorical distributions, `performance_rating` is low-cardinality
+numeric, and `employee_id`/`full_name`/`email`/`salary` are there to
+anonymize.
+
+```text
+employee_id,full_name,email,department,region,employment_type,performance_rating,salary
+E1001,Emily Lee,emily.lee001@example.com,Sales,North,Full-time,4,62000
+E1002,Joshua Clark,joshua.clark002@example.com,Finance,South,Full-time,4,50000
+E1003,Donald Martin,donald.martin003@example.com,Operations,East,Contract,3,68500
+```
+
+### In the TUI
+
+```sh
+data-sampler examples/employees.csv --tui
+```
+
+The columns screen opens with the stats table. Try: select `full_name` and
+set its anonymizer to **names**; select `employee_id` and choose
+**sequential id** (start 1000); select `salary` and choose **numeric
+jitter**; select `performance_rating` and flip **skip when stratifying** to
+keep it out of the variety-preservation logic. Set rows to `100`, seed to
+`42`, and press `ctrl+r` — the report screen shows how closely the sample
+tracks the original distributions.
+
+### With the Python functions
+
+```python
+import data_sampler as ds
+
+df = ds.load_file("examples/employees.csv")
+
+result = ds.sample(df, 100, random_state=42)          # stratifies automatically
+print(ds.format_stratification_report(df, result))
+
+anon = ds.anonymize(
+    result.data,
+    {
+        "full_name": "names",
+        "employee_id": ("sequential_id", {"start": 1000}),
+        "salary": "numeric_jitter",
+        "email": {"kind": "hex", "length": 10},
+    },
+    seed=42,
+)
+ds.save_output(anon, "examples/employees.csv", tag="sample_100_anon")
+```
+
+### From the CLI
+
+```sh
+data-sampler examples/employees.csv 100 --seed 42 \
+    --anon "full_name=names" \
+    --anon "employee_id=sequential_id:start=1000" \
+    --anon "salary=numeric_jitter" \
+    --anon "email=hex:length=10"
+```
+
+The run stratifies on `employment_type`, `region`, and `department`, and the
+report shows original vs. sample side by side (excerpt):
+
+```text
+  Column: 'employment_type' (3 categories)
+          Value          Original                    Sample
+  ─────────────────────────────────────────────────────────────────────
+       Contract  ██░░░░░░░░░░░░░  10.1%  █░░░░░░░░░░░░░░   9.0%
+      Full-time  ███████████████  68.9%  ███████████████  68.0%
+      Part-time  ████░░░░░░░░░░░  21.0%  █████░░░░░░░░░░  23.0%
+  ─────────────────────────────────────────────────────────────────────
+         Totals                   1000                     100
+```
+
+The anonymized sample keeps the structure but none of the identities —
+repeated values still repeat, salaries stay within ±20 % of the originals:
+
+```text
+employee_id,full_name,email,department,region,employment_type,performance_rating,salary
+1000,Ravi Andersen,6a78c49ea2,Engineering,South,Full-time,1,62264
+1001,Thomas Gomez,0e32684b27,Engineering,North,Part-time,3,102743
+1002,Fatima Singh,b95e909348,Operations,North,Full-time,3,46793
+```
+
 ## Anonymizers
 
 Every anonymizer maps each unique original value to exactly one replacement,
