@@ -1,5 +1,55 @@
 # Changelog
 
+## v3.0 — 2026-07-19
+
+### Package restructure
+
+- **Proper Python package.** The flat scripts are gone; everything now lives
+  in a src-layout package (`src/data_sampler/`) built with hatchling and
+  installable via `pip install -e .` (wheel-ready for a future PyPI
+  release — the release itself stays manual, after extensive testing).
+- **Public API.** `load_file`, `list_sheets`, `save_output`,
+  `compute_stats`/`ColumnStats`, `sample`/`SampleResult`,
+  `stratified_sample`, `find_stratification_columns`,
+  `format_stratification_report`, `anonymize`, `make_anonymizer`, and
+  `run_tui` are importable from `data_sampler`.
+- **Old Tkinter GUI removed** (`data-sampler-gui.py`), replaced by the TUI.
+- **Central logging** behind `DATA_SAMPLER_LOG` / `DATA_SAMPLER_LOG_FILE`.
+
+### Terminal UI (new)
+
+- Colorful, panel-based Textual dashboard (btop / lazydocker style):
+  file picker with directory browser, Data Wrangler-style column stats
+  table (type, missing %, unique count, distribution sparkline, summary),
+  per-column detail panel with distribution bars, anonymizer configuration,
+  stratification skip toggles, and a post-run report screen.
+- Launch via `data-sampler` (no args), `data-sampler-tui`,
+  `python -m data_sampler`, or `data_sampler.run_tui()`.
+
+### Anonymizers (new)
+
+- Optional per-column anonymization with **consistent value mapping**
+  (repeated values stay repeated, so distributions survive) and NaN
+  passthrough: `names` (bundled first/middle/last name library, five
+  styles), `sequential_id` (start + interval, optional prefix/zero-pad),
+  `numeric_jitter` (±20 % by default), `random_string` / `hex`
+  (configurable length/charset). Seedable for reproducible runs.
+
+### Sampling engine
+
+- `sample()` accepts `exclude_columns` (columns the user marks as skipped
+  never become stratifiers) and `random_state` for reproducible sampling.
+- Sampling functions no longer print; they return a `SampleResult` that the
+  CLI/TUI render via `format_stratification_report`.
+- Fixed string-column classification under pandas 3.0 (new default
+  `StringDtype` no longer matched the `object` dtype checks).
+
+### CLI
+
+- `data-sampler <source> <count>` now supports `--seed`,
+  `--skip COL[,COL]`, and repeatable `--anon "COL=KIND[:k=v,...]"`
+  anonymization options; with no arguments it opens the TUI.
+
 ## v2.0 — 2026-04-13
 
 ### Sampling engine
