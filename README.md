@@ -195,6 +195,20 @@ employee_id,full_name,email,department,region,employment_type,performance_rating
 1002,Fatima Singh,b95e909348,Operations,North,Full-time,3,46793
 ```
 
+### Notebook and launcher scripts
+
+- [examples/using_data_sampler.ipynb](examples/using_data_sampler.ipynb) —
+  the full package walkthrough as an executed Jupyter notebook (load →
+  stats → sample → anonymize → save, with outputs included).
+- [scripts/run-tui.sh](scripts/run-tui.sh) — opens the TUI on Linux (any
+  distro) and macOS; falls back from the `data-sampler` command to
+  `python3 -m data_sampler` and prints install instructions if neither is
+  available.
+- [scripts/run-tui.bat](scripts/run-tui.bat) — the same for Windows
+  (double-clickable).
+
+Both scripts pass arguments through, e.g. `./scripts/run-tui.sh data.csv`.
+
 ## Anonymizers
 
 Every anonymizer maps each unique original value to exactly one replacement,
