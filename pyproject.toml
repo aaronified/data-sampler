@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "data-sampler"
+version = "3.0.0"
+description = "Representative (stratified) sampling and column anonymization for tabular data files, with a terminal UI."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "aaronified" }]
+keywords = ["sampling", "stratified", "anonymization", "data", "tui", "pandas"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "openpyxl>=3.0",
+    "pyarrow>=10",
+    "textual>=0.86",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "build",
+]
+
+[project.scripts]
+data-sampler = "data_sampler.cli:main"
+data-sampler-tui = "data_sampler.tui:run_tui"
+
+[project.urls]
+Homepage = "https://github.com/aaronified/data-sampler"
+Changelog = "https://github.com/aaronified/data-sampler/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data_sampler"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,4 +1,7 @@
-pandas
-openpyxl
-pyarrow
-pyinstaller
+# Convenience mirror of runtime dependencies — pyproject.toml is the source
+# of truth. Prefer: pip install -e ".[dev]"
+pandas>=1.5
+numpy>=1.23
+openpyxl>=3.0
+pyarrow>=10
+textual>=0.86

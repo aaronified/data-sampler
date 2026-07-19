@@ -1,0 +1,64 @@
+# Troubleshooting
+
+Failures encountered during development, with symptom, cause, and fix.
+Add an entry for every defect found by tests or manual runs.
+
+## Legacy root module shadows the package
+
+- **Symptom:** after the v3 restructure, all pytest files failed collection
+  with `ModuleNotFoundError: 'data_sampler' is not a package`, and
+  `import data_sampler; data_sampler.__version__` raised `AttributeError`
+  when run from the project root — while the same import worked from any
+  other directory.
+- **Cause:** the pre-rewrite monolith `data_sampler.py` still sat at the repo
+  root. Python puts the current directory ahead of installed packages on
+  `sys.path`, so the legacy module shadowed the new `src/data_sampler`
+  package whenever anything ran from the project directory.
+- **Fix:** `git rm data_sampler.py data-sampler-gui.py` and delete the stale
+  root `__pycache__/`. When restructuring a flat script into a package of
+  the same name, always remove (or rename) the old top-level file first.
+
+## pandas 3.0 string columns classified as "other"
+
+- **Symptom:** three stats tests failed — string columns reported
+  `kind == "other"` instead of `categorical`/`text`, and long-text columns
+  were no longer excluded from stratification.
+- **Cause:** pandas 3.0 changed the default dtype for strings from `object`
+  to `StringDtype`, so `series.dtype == object` checks stopped matching
+  string columns.
+- **Fix:** broadened the checks in `stats.py` (`_classify` and
+  `is_stratifiable`) to `series.dtype == object or
+  pd.api.types.is_string_dtype(series) or isinstance(series.dtype,
+  pd.CategoricalDtype)`.
+
+## RecursionError on lazy `data_sampler.anonymize` access
+
+- **Symptom:** `import data_sampler; data_sampler.anonymize(...)` recursed
+  until `RecursionError`.
+- **Cause:** the module-level `__getattr__` used
+  `from . import anonymize` — the fromlist import machinery calls
+  `hasattr(package, "anonymize")`, which re-enters `__getattr__` before the
+  submodule is bound, looping forever.
+- **Fix:** use `importlib.import_module(".anonymize", __name__)` inside
+  `__getattr__` instead of the `from . import` form.
+
+## Flaky headless TUI tests (race with screen mount)
+
+- **Symptom:** pilot-driven TUI tests failed intermittently: empty
+  `DataTable`, `selected` still `None`, or an anonymizer kind snapping back
+  to `none` right after the test set it.
+- **Cause:** `pilot.pause(delay)` only sleeps — it does not drain Textual's
+  message queue. Tests interacted with `ColumnsScreen` the moment it was on
+  the screen stack, before its `on_mount` (table population, initial
+  `RowHighlighted` → config-panel sync) had processed.
+- **Fix:** after waiting for a screen, call no-argument `pilot.pause()`
+  (which waits for idle) before touching widgets. Also hardened
+  `on_select_changed` to ignore no-op changes so a late mount-time sync
+  cannot clobber user selections. Textual 8.x note: `Static` content is
+  read via `.content`, not the removed `.renderable`.
+
+## Template
+
+- **Symptom:** what was observed.
+- **Cause:** root cause.
+- **Fix:** what resolved it.
