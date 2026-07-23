@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.2.1 — 2026-07-23
+
+- **Fixed a TUI race that only surfaced on slow machines** (caught by the
+  v3.2.0 release CI on Windows runners; it blocked the PyPI publish): a late
+  mount-time row-highlight for the already-selected column could re-sync the
+  config panel and queue a stale `Changed` message that reset a just-made
+  anonymizer choice back to `none`. Duplicate highlights are now no-ops and
+  the panel sync no longer queues gratuitous widget updates. This is the
+  first release published to PyPI (v3.2.0's publish run failed on this bug).
+
 ## v3.2.0 — 2026-07-23
 
 - **Measured parallel scaling** (20M-row Parquet, 12-core machine,

@@ -209,6 +209,29 @@ all were fixed except one accepted divergence. Highlights worth remembering:
   differently under the same seed. Each engine is internally deterministic;
   cross-engine identical samples were never promised.
 
+## CI-only TUI failure: user's Select edit reset to "none" (v3.2.0 release run)
+
+- **Symptom:** `test_full_flow_sample_and_anonymize` failed only on GitHub
+  Actions Windows runners (`assert 'none' == 'sequential_id'`), passing
+  locally and on Linux CI. This blocked the first PyPI publish.
+- **Cause:** a second race in the same family as "Flaky headless TUI tests":
+  setting `Select.value` queues a `Changed` message. On slow runners the
+  mount-time `RowHighlighted` for the already-selected row was still queued
+  when the test edited the Select; its `_sync_config_panel` reset the widget
+  to the config's old value, queueing a stale `Changed("none")` that was
+  processed *after* `_syncing` cleared — clobbering the edit. The `_syncing`
+  flag cannot help: it only covers messages *processed* during the sync, not
+  messages *queued* by it.
+- **Fix:** two structural changes in `ColumnsScreen`: (1) a `RowHighlighted`
+  for the row already shown returns early — the panel is already correct and
+  re-syncing can only clobber in-flight edits; (2) `_sync_config_panel` only
+  assigns widgets whose value actually differs, so it never queues gratuitous
+  `Changed` messages. Regression test simulates the interleave directly
+  (`test_duplicate_row_highlight_does_not_clobber_pending_edit`).
+- **Lesson:** in Textual, any handler that writes widget values can generate
+  *future* messages; a synchronous re-entrancy flag does not protect against
+  them. Guard by making re-syncs conditional, not by flags alone.
+
 ## Template
 
 - **Symptom:** what was observed.

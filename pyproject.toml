@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data-sampler"
-version = "3.2.0"
+version = "3.2.1"
 description = "Representative (stratified) sampling and column anonymization for tabular data files, with a terminal UI."
 readme = "README.md"
 license = { file = "LICENSE" }

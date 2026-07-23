@@ -119,6 +119,34 @@ def test_report_screen_shows_column_histograms(csv_file):
     run(go())
 
 
+def test_duplicate_row_highlight_does_not_clobber_pending_edit(csv_file):
+    """Regression: the CI-only race behind test_full_flow flakiness.
+
+    A user edit queues Select.Changed("sequential_id"); if a late mount-time
+    RowHighlighted for the SAME row then re-syncs the panel, it queues a stale
+    Changed("none") that lands after _syncing clears and resets the config.
+    A duplicate highlight must be a no-op.
+    """
+    from types import SimpleNamespace
+
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(140, 45)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            assert screen.selected == "id"
+            # user edit: queued as a Changed message, not yet processed
+            screen.query_one("#anon-kind", Select).value = "sequential_id"
+            # simulate the late duplicate mount-time highlight arriving first
+            fake = SimpleNamespace(row_key=SimpleNamespace(value="id"))
+            screen.on_data_table_row_highlighted(fake)
+            await pilot.pause()
+            assert screen.configs["id"].kind == "sequential_id"
+            # and the widget was not reset underneath the user
+            assert screen.query_one("#anon-kind", Select).value == "sequential_id"
+
+    run(go())
+
+
 def test_invalid_count_notifies_instead_of_running(csv_file):
     async def go():
         app = DataSamplerApp(path=str(csv_file))

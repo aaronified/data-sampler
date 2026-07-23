@@ -486,19 +486,29 @@ class ColumnsScreen(Screen):
         cfg = self.configs[name]
         self._syncing = True
         try:
-            self.query_one("#anon-kind", Select).value = cfg.kind
+            # only assign widgets whose value actually differs: assignments
+            # queue Changed messages that are processed AFTER _syncing clears,
+            # so gratuitous ones can clobber a config edit still in flight
+            kind_select = self.query_one("#anon-kind", Select)
+            if kind_select.value != cfg.kind:
+                kind_select.value = cfg.kind
             self.query_one("#anon-options", ContentSwitcher).current = f"opts-{cfg.kind}"
-            self.query_one("#opt-names-style", Select).value = (
-                cfg.options.get("style") or "first_last"
-            )
+            style_select = self.query_one("#opt-names-style", Select)
+            style_value = cfg.options.get("style") or "first_last"
+            if style_select.value != style_value:
+                style_select.value = style_value
             for widget_id, (kind, opt) in self._OPT_IDS.items():
-                value = (
+                value = str(
                     cfg.options.get(opt, self._OPT_DEFAULTS[widget_id])
                     if cfg.kind == kind
                     else self._OPT_DEFAULTS[widget_id]
                 )
-                self.query_one(f"#{widget_id}", Input).value = str(value)
-            self.query_one("#skip-strat", Switch).value = cfg.skip_strat
+                widget = self.query_one(f"#{widget_id}", Input)
+                if widget.value != value:
+                    widget.value = value
+            skip = self.query_one("#skip-strat", Switch)
+            if skip.value != cfg.skip_strat:
+                skip.value = cfg.skip_strat
         finally:
             self._syncing = False
 
@@ -506,6 +516,12 @@ class ColumnsScreen(Screen):
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.row_key is None or event.row_key.value is None:
+            return
+        if event.row_key.value == self.selected:
+            # duplicate highlight for the row already shown (e.g. the initial
+            # mount-time highlight arriving late): re-syncing here would reset
+            # panel widgets and queue stale Changed messages that clobber any
+            # user edit still in flight — the panel is already correct
             return
         self.selected = event.row_key.value
         self._show_detail(self.selected)
