@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data-sampler"
-version = "3.2.1"
-description = "Representative (stratified) sampling and column anonymization for tabular data files, with a terminal UI."
+version = "3.3.0"
+description = "Hand someone data that looks and behaves like your production data, isn't your production data, and provably kept its statistical variety — stratified sampling + consistent anonymization, with a terminal UI."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

@@ -1,6 +1,6 @@
 # Changelog
 
-## v3.3.0 — unreleased
+## v3.3.0 — 2026-07-23
 
 - **Two-phase narrow sampling in the DuckDB engine.** The expensive phase of a
   sample (the per-stratum window sort, or the reservoir buffer) now runs over
