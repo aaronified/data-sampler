@@ -40,6 +40,22 @@ async def wait_for_screen(app, pilot, screen_type, tries=100):
     raise AssertionError(f"never reached {screen_type.__name__}; on {type(app.screen).__name__}")
 
 
+async def wait_until(pilot, predicate, what="condition", tries=150):
+    """Wait for cross-widget state to converge before asserting.
+
+    Every Textual widget runs its own message pump, so a single
+    ``pilot.pause()`` does not guarantee a posted Changed message has been
+    DELIVERED to the screen yet — assert-after-one-pause is a timing lottery
+    that only loses on slow CI runners. The app state is eventually
+    consistent; tests must wait for it.
+    """
+    for _ in range(tries):
+        if predicate():
+            return
+        await pilot.pause(0.05)
+    raise AssertionError(f"never converged: {what}")
+
+
 def test_file_screen_rejects_missing_file(tmp_path):
     async def go():
         app = DataSamplerApp()
@@ -80,11 +96,15 @@ def test_full_flow_sample_and_anonymize(csv_file, tmp_path):
             # configure: anonymize the highlighted column (first = "id")
             assert screen.selected == "id"
             screen.query_one("#anon-kind", Select).value = "sequential_id"
-            await pilot.pause()
-            assert screen.configs["id"].kind == "sequential_id"
+            await wait_until(
+                pilot, lambda: screen.configs["id"].kind == "sequential_id",
+                "anon kind applied",
+            )
             screen.query_one("#opt-seq-start", Input).value = "5000"
-            await pilot.pause()
-            assert screen.configs["id"].options["start"] == "5000"
+            await wait_until(
+                pilot, lambda: screen.configs["id"].options.get("start") == "5000",
+                "start option applied",
+            )
             # skip a column from stratification
             screen.configs["region"].skip_strat = True
             # run
@@ -139,8 +159,10 @@ def test_duplicate_row_highlight_does_not_clobber_pending_edit(csv_file):
             # simulate the late duplicate mount-time highlight arriving first
             fake = SimpleNamespace(row_key=SimpleNamespace(value="id"))
             screen.on_data_table_row_highlighted(fake)
-            await pilot.pause()
-            assert screen.configs["id"].kind == "sequential_id"
+            await wait_until(
+                pilot, lambda: screen.configs["id"].kind == "sequential_id",
+                "kind survives duplicate highlight",
+            )
             # and the widget was not reset underneath the user
             assert screen.query_one("#anon-kind", Select).value == "sequential_id"
 
@@ -163,11 +185,16 @@ def test_stale_changed_messages_do_not_clobber_config(csv_file):
             assert screen.selected == "id"
             sel = screen.query_one("#anon-kind", Select)
             sel.value = "sequential_id"
-            await pilot.pause()
+            await wait_until(
+                pilot, lambda: screen.configs["id"].kind == "sequential_id",
+                "anon kind applied",
+            )
             start_input = screen.query_one("#opt-seq-start", Input)
             start_input.value = "5000"
-            await pilot.pause()
-            assert screen.configs["id"].options["start"] == "5000"
+            await wait_until(
+                pilot, lambda: screen.configs["id"].options.get("start") == "5000",
+                "start option applied",
+            )
             # deliver a stale Changed("none"): widget shows "sequential_id",
             # so the handler must drop it instead of resetting the config
             screen.on_select_changed(Select.Changed(sel, "none"))

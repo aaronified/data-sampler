@@ -269,6 +269,26 @@ all were fixed except one accepted divergence. Highlights worth remembering:
   without checking it still matches the widget — cross-widget delivery order
   is unspecified, and only loaded machines (CI) expose it.
 
+## CI-only TUI failure #3: message-delivery lag (v3.3.1 release run)
+
+- **Symptom:** with both real races fixed, the release CI failed once more —
+  this time inside the new regression test itself, before any stale message
+  was delivered: `options["start"]` was asserted one `pilot.pause()` after
+  setting the Input, and on a slow runner the `Changed` had not yet been
+  *delivered* to the screen.
+- **Cause:** not an app bug. `pilot.pause()` drains the app-level queue, but
+  every Textual widget runs its own message pump — cross-widget delivery can
+  outlive a single pause. App state is eventually consistent (and the
+  `_is_stale` guard keeps it *correct* whenever it settles); only the test's
+  assert-after-one-pause pattern was racy.
+- **Fix:** a `wait_until(pilot, predicate)` test helper that polls until the
+  state converges (bounded, fails loudly on timeout), used for every
+  cross-widget assertion. Tests-only change — the packaged artifact is
+  unaffected.
+- **Lesson:** the full pattern for Textual testing: *wait_for_screen* for
+  navigation, *wait_until* for cross-widget state, and never assert
+  immediately after a single pause.
+
 ## Template
 
 - **Symptom:** what was observed.
