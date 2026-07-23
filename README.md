@@ -71,6 +71,9 @@ data-sampler <source> <count> [options]
 | `--anon COL=KIND[:k=v,...]` | Anonymize a column (repeatable) |
 | `-i`, `--interactive` | Guided workflow: choose an anonymizer type per column from a menu |
 | `--suggest` | Auto-assign a suggested anonymizer type to each column from its stats |
+| `--engine {auto,pandas,duckdb}` | Sampling engine (default `auto`: DuckDB for Parquet/large inputs, pandas otherwise) |
+| `--threads N` | DuckDB engine: number of threads (default: all cores) |
+| `--memory-limit SIZE` | DuckDB engine: memory limit before spilling to disk (e.g. `8GB`) |
 | `--tui` | Open the TUI (optionally preloading `source`) |
 
 Examples:
@@ -83,6 +86,9 @@ data-sampler data.csv 100 --skip region,notes --seed 7 \
     --anon "cust_id=sequential_id:start=1000,interval=7" \
     --anon "salary=numeric_jitter:pct=0.1" \
     --anon "email=hex:length=12"
+
+# large / out-of-core: sample a Parquet file in parallel with DuckDB
+data-sampler huge.parquet 10000 --engine duckdb --threads 8 --memory-limit 8GB --suggest
 ```
 
 ## Python API

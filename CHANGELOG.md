@@ -46,6 +46,15 @@
   exact counts/quantiles for small inputs, and `distributions=False` skips
   the per-column passes for a single cheap scalar pass across very wide
   inputs. A new `ColumnStats.approximate` flag marks approximate results.
+- **Wired the DuckDB engine into the CLI** (Block P6 of the v3.2 performance
+  & scale effort): new `--engine {auto,pandas,duckdb}` flag (default `auto`
+  — DuckDB for Parquet/large inputs, pandas otherwise), plus `--threads` and
+  `--memory-limit` to tune the engine. The engine path supports
+  `--random`/`--skip`/`--seed`/`--anon` and `--suggest` (suggestions computed
+  from the engine's approximate stats, without materializing the full
+  input); `--interactive` remains pandas-only. When the pandas path is used
+  on a large input, a note suggests the engine. Auto-selection falls back to
+  pandas if the optional `duckdb` dependency is absent.
 
 ## v3.1 — unreleased
 

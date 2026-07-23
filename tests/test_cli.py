@@ -1,13 +1,25 @@
+import importlib.util
+
 import pandas as pd
 import pytest
 
 from data_sampler.cli import main, parse_anon_option
+
+_HAS_DUCKDB = importlib.util.find_spec("duckdb") is not None
+needs_duckdb = pytest.mark.skipif(not _HAS_DUCKDB, reason="requires the 'large' extra (duckdb)")
 
 
 @pytest.fixture
 def csv_file(tmp_path, demo_df):
     src = tmp_path / "data.csv"
     demo_df.to_csv(src, index=False)
+    return src
+
+
+@pytest.fixture
+def parquet_file(tmp_path, demo_df):
+    src = tmp_path / "data.parquet"
+    demo_df.to_parquet(src, index=False)
     return src
 
 
@@ -114,3 +126,67 @@ def test_cli_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     assert "data-sampler" in capsys.readouterr().out
+
+
+# ── DuckDB engine ─────────────────────────────────────────────────────────────
+
+@needs_duckdb
+def test_cli_engine_duckdb_parquet(parquet_file, capsys):
+    code = main([str(parquet_file), "100", "--engine", "duckdb", "--seed", "1"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "DuckDB engine" in out
+    result = parquet_file.parent / "data_sample_100.parquet"
+    assert result.exists()
+    assert len(pd.read_parquet(result)) == 100
+
+
+@needs_duckdb
+def test_cli_engine_auto_selects_for_parquet(parquet_file, capsys):
+    # --engine auto (the default) should pick DuckDB for a Parquet source
+    code = main([str(parquet_file), "80", "--seed", "1"])
+    assert code == 0
+    assert "DuckDB engine" in capsys.readouterr().out
+    assert (parquet_file.parent / "data_sample_80.parquet").exists()
+
+
+@needs_duckdb
+def test_cli_engine_random_and_stratified(parquet_file, capsys):
+    assert main([str(parquet_file), "60", "--engine", "duckdb", "--random", "--seed", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "reservoir" in out.lower()
+
+
+@needs_duckdb
+def test_cli_engine_suggest_anonymizes(parquet_file, capsys):
+    code = main([str(parquet_file), "50", "--engine", "duckdb", "--seed", "1", "--suggest"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Anonymized columns" in out
+    df = pd.read_parquet(parquet_file.parent / "data_sample_50_anon.parquet")
+    assert not df["name"].astype(str).str.startswith("Person").any()
+
+
+@needs_duckdb
+def test_cli_engine_explicit_anon(parquet_file):
+    code = main([
+        str(parquet_file), "40", "--engine", "duckdb", "--seed", "1",
+        "--anon", "id=sequential_id:start=7000",
+    ])
+    assert code == 0
+    df = pd.read_parquet(parquet_file.parent / "data_sample_40_anon.parquet")
+    assert df["id"].min() >= 7000
+
+
+@needs_duckdb
+def test_cli_engine_rejects_interactive(parquet_file):
+    with pytest.raises(SystemExit):
+        main([str(parquet_file), "10", "--engine", "duckdb", "--interactive"])
+
+
+@needs_duckdb
+def test_cli_engine_csv_stratified(csv_file):
+    code = main([str(csv_file), "50", "--engine", "duckdb", "--seed", "1"])
+    assert code == 0
+    df = pd.read_csv(csv_file.parent / "data_sample_50.csv")
+    assert len(df) == 50
