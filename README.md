@@ -3,13 +3,38 @@
 [![PyPI](https://img.shields.io/pypi/v/data-sampler)](https://pypi.org/project/data-sampler/)
 [![Python](https://img.shields.io/pypi/pyversions/data-sampler)](https://pypi.org/project/data-sampler/)
 
-Creates representative samples from data files, using stratified sampling to
-preserve the statistical variety of your data — with optional per-column
-anonymization and a colorful terminal UI.
+**Hand someone data that looks and behaves like your production data, isn't
+your production data, and provably kept its statistical variety — in one
+command.**
 
-Everything ships as a single Python package: launch the TUI with one
-function call or command, or use the sampling/anonymization functions
-directly from Python.
+```sh
+data-sampler customers.xlsx 500 --suggest
+```
+
+Use it to:
+
+- **Share a realistic slice with a vendor or contractor** — names, ids,
+  emails, salaries, and dates anonymized, but every distribution, duplicate,
+  and group structure intact.
+- **Attach a repro to a bug report** without leaking the real records that
+  trigger it.
+- **Cut a 2 GB export down to 500 rows** for a demo or prototype that still
+  behaves like the real thing.
+- **Build test fixtures that mirror production skew** instead of uniform toy
+  data.
+- **Give a class or workshop realistic data** without a data-sharing
+  agreement.
+- **Pull 10,000 representative rows from a 100M-row Parquet file** without
+  loading it — the optional DuckDB engine samples out-of-core, in parallel.
+- **Prove the sample is representative**: every run produces a side-by-side
+  source-vs-sample distribution report, per column.
+
+How: stratified sampling preserves the statistical variety of your data
+(strata are detected automatically), and every anonymizer maps each unique
+original value to exactly one replacement — so repeated values stay repeated
+and the joint distributions survive anonymization. Everything ships as a
+single Python package: a colorful terminal UI for non-programmers, a headless
+CLI, and a plain Python API.
 
 ## Install
 
