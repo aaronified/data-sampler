@@ -1,5 +1,8 @@
 # data-sampler
 
+[![PyPI](https://img.shields.io/pypi/v/data-sampler)](https://pypi.org/project/data-sampler/)
+[![Python](https://img.shields.io/pypi/pyversions/data-sampler)](https://pypi.org/project/data-sampler/)
+
 Creates representative samples from data files, using stratified sampling to
 preserve the statistical variety of your data — with optional per-column
 anonymization and a colorful terminal UI.
@@ -11,12 +14,12 @@ directly from Python.
 ## Install
 
 ```sh
-pip install data-sampler        # once released on PyPI
-# from a clone, today:
-pip install -e ".[dev]"
+pip install data-sampler             # from PyPI
+pip install "data-sampler[large]"    # + the out-of-core DuckDB engine for huge files
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. For development, clone the repo and
+`pip install -e ".[dev]"`.
 
 ## Terminal UI
 
@@ -365,7 +368,8 @@ Logging is controlled by `DATA_SAMPLER_LOG` (`quiet`/`info`/`verbose`) and
 `DATA_SAMPLER_LOG_FILE`. See `ROADMAP.md` for planned work and
 `TROUBLESHOOTING.md` for known failure modes.
 
-PyPI releases are manual and happen only after extensive testing.
+Releases go to [PyPI](https://pypi.org/project/data-sampler/) via a
+human-triggered, test-gated GitHub Actions workflow — see `RELEASING.md`.
 
 ---
 

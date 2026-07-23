@@ -5,23 +5,19 @@ human publishes a GitHub Release (or manually dispatches the workflow). The
 workflow uses **PyPI Trusted Publishing** (OIDC), so no API token is stored in
 the repo, in CI secrets, or anywhere else.
 
-## One-time setup (PyPI side)
+## One-time setup (PyPI side) — DONE (v3.2.1, 2026-07-23)
 
-1. Create a PyPI account at <https://pypi.org/account/register/> and enable 2FA.
-2. Because `data-sampler` has no release on PyPI yet, register a **pending
-   publisher**: <https://pypi.org/manage/account/publishing/> → "Add a new
-   pending publisher" with:
-   - PyPI project name: `data-sampler`
-   - Owner: `aaronified`
-   - Repository: `data-sampler`
-   - Workflow name: `release.yml`
-   - Environment name: `pypi`
-3. (Recommended) In GitHub: Settings → Environments → create `pypi` and add
-   yourself as a required reviewer. The publish job then waits for your
-   click-to-approve on every release.
+Completed: the PyPI account exists, and the pending publisher (project
+`data-sampler`, owner `aaronified`, repo `data-sampler`, workflow
+`release.yml`, environment `pypi`) became the project's permanent **trusted
+publisher** with the first publish. Nothing to repeat per release.
 
-After the first successful publish, the pending publisher becomes the project's
-trusted publisher automatically.
+If it ever needs re-registering (new repo/owner/workflow name), manage it at
+<https://pypi.org/manage/project/data-sampler/settings/publishing/>.
+
+Still recommended: in GitHub → Settings → Environments → `pypi`, add yourself
+as a required reviewer so every publish waits for your click-to-approve
+(currently publishes run unattended once tests pass).
 
 ## Per release
 
