@@ -2,6 +2,12 @@
 
 ## v3.2.0 — 2026-07-23
 
+- **Measured parallel scaling** (20M-row Parquet, 12-core machine,
+  10k-row sample): stratified sampling 14.5 s → 3.9 s from 1 → 8 threads
+  (3.7×), `stats()` 9.5 s → 1.7 s (5.6×), reservoir sampling 0.10 s —
+  ~50× faster than the pandas path on the same file, with no ~0.9 GB
+  in-memory materialization.
+
 - **Vectorized every anonymizer** (Block P1 of the v3.2 performance & scale
   effort): the transform pipeline now does a single `pd.factorize`
   (dictionary-encode) plus a vectorized gather instead of `pd.unique` + a

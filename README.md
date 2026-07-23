@@ -325,6 +325,20 @@ should_use_engine("huge.parquet")   # True — Parquet always benefits from push
 is big enough that loading it fully into pandas may exhaust memory — Parquet in
 particular expands well beyond its compressed on-disk size.
 
+Measured on a 20M-row Parquet file (5 columns, 12-core machine), sampling
+10,000 rows:
+
+| threads | stratified sample | reservoir sample | `stats()` |
+| ---: | ---: | ---: | ---: |
+| 1 | 14.5 s | 0.39 s | 9.5 s |
+| 4 | 5.1 s | 0.16 s | 2.8 s |
+| 8 | 3.9 s | 0.13 s | 2.1 s |
+| 12 | 4.0 s | 0.10 s | 1.7 s |
+
+The pandas path on the same file: 5.6 s total while materializing a ~0.9 GB
+frame in RAM — the engine's reservoir sampling is ~50× faster and never
+materializes the source at all.
+
 ## Supported formats
 
 | Format | Extensions |

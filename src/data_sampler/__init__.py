@@ -16,7 +16,7 @@ Public API::
 
 from __future__ import annotations
 
-__version__ = "3.0.1"
+__version__ = "3.2.0"
 
 from .io import SUPPORTED_EXTENSIONS, list_sheets, load_file, save_output
 from .report import (
