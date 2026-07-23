@@ -101,6 +101,24 @@ def test_full_flow_sample_and_anonymize(csv_file, tmp_path):
     run(go())
 
 
+def test_report_screen_shows_column_histograms(csv_file):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(160, 48)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            screen.query_one("#count", Input).value = "50"
+            screen.query_one("#seed", Input).value = "1"
+            screen.action_run()
+            report = await wait_for_screen(app, pilot, ReportScreen)
+            report.query_one("#hist-panel")  # panel exists
+            content = str(report.query_one("#hist-text", Static).content)
+            assert "score" in content  # a numeric column was charted
+            assert "region" in content  # a categorical column was charted
+            assert "%" in content and "sample" in content
+
+    run(go())
+
+
 def test_invalid_count_notifies_instead_of_running(csv_file):
     async def go():
         app = DataSamplerApp(path=str(csv_file))

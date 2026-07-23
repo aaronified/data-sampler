@@ -612,6 +612,7 @@ class ColumnsScreen(Screen):
         app: DataSamplerApp = self.app  # type: ignore[assignment]
         try:
             from ..anonymize import anonymize
+            from ..report import column_histogram_data
 
             result = sample(
                 app.df, count,
@@ -619,6 +620,8 @@ class ColumnsScreen(Screen):
                 exclude_columns=exclude,
                 random_state=seed,
             )
+            # source-vs-sample histograms use the pre-anonymization sample
+            hist_data = column_histogram_data(app.df, result.data)
             data = result.data
             if spec:
                 data = anonymize(data, spec, seed=seed)
@@ -640,7 +643,9 @@ class ColumnsScreen(Screen):
             lines.append("")
             lines.append(f"Sampled {len(data)} rows.")
             lines.append(f"Output saved to: {out_path}")
-            app.call_from_thread(self._run_done, "\n".join(lines), str(out_path))
+            app.call_from_thread(
+                self._run_done, "\n".join(lines), str(out_path), hist_data
+            )
         except Exception as exc:  # surfaced to the user, never crash the TUI
             log.exception("run failed")
             app.call_from_thread(self._run_failed, exc)
@@ -649,37 +654,74 @@ class ColumnsScreen(Screen):
         self.query_one("#run", Button).disabled = False
         self.notify(f"{type(exc).__name__}: {exc}", severity="error", timeout=10)
 
-    def _run_done(self, report: str, out_path: str) -> None:
+    def _run_done(self, report: str, out_path: str, hist_data: list) -> None:
         self.query_one("#run", Button).disabled = False
-        self.app.push_screen(ReportScreen(report, out_path))
+        self.app.push_screen(ReportScreen(report, out_path, hist_data))
 
 
 class ReportScreen(Screen):
-    """Post-run report: stratification comparison + anonymization summary."""
+    """Post-run report: stratification comparison, per-column histograms,
+    anonymization summary."""
 
     BINDINGS = [
         Binding("escape", "back", "back to columns"),
         Binding("n", "new_file", "new file"),
     ]
 
-    def __init__(self, report: str, out_path: str):
+    HIST_BAR = 12  # width of each histogram bar in the panel
+
+    def __init__(self, report: str, out_path: str, hist_data: list | None = None):
         super().__init__()
         self._report = report
         self._out_path = out_path
+        self._hist_data = hist_data or []
 
     def compose(self) -> ComposeResult:
         yield Static(" ▓▒░ DATA SAMPLER ░▒▓  sample complete", id="titlebar")
-        with VerticalScroll(id="report-panel"):
-            yield Static(Text(self._report), id="report-text")
+        with Horizontal(id="report-main"):
+            with VerticalScroll(id="report-panel"):
+                yield Static(Text(self._report), id="report-text")
+            with VerticalScroll(id="hist-panel"):
+                yield Static(self._build_histograms(), id="hist-text")
         with Horizontal(id="report-actions"):
             yield Button("◀ back (esc)", id="back")
             yield Button("new file (n)", id="new-file", variant="primary")
         yield Footer()
 
     def on_mount(self) -> None:
-        panel = self.query_one("#report-panel")
-        panel.border_title = "report"
-        panel.focus()
+        report_panel = self.query_one("#report-panel")
+        report_panel.border_title = "report"
+        self.query_one("#hist-panel").border_title = "column histograms"
+        report_panel.focus()
+
+    def _build_histograms(self) -> Text:
+        if not self._hist_data:
+            return Text("no columns to chart", style=DIM)
+        t = Text()
+        t.append("source ", style=DIM)
+        t.append("█", style=DIM)
+        t.append("   sample ", style=DIM)
+        t.append("█", style=CYAN)
+        t.append("  (% of non-null values)\n", style=DIM)
+        for d in self._hist_data:
+            labels = d["labels"]
+            if not labels:
+                continue
+            color = KIND_COLORS.get(d["kind"], DIM)
+            label_w = min(16, max(len(l) for l in labels))
+            peak = max([*d["source_pct"], *d["sample_pct"], 1e-9])
+            t.append(f"\n{d['name']} ", style=f"bold {color}")
+            t.append(f"({d['kind']})\n", style=DIM)
+            for label, s_pct, m_pct in zip(labels, d["source_pct"], d["sample_pct"]):
+                lbl = label if len(label) <= label_w else label[: label_w - 1] + "…"
+                s_len = int(s_pct / peak * self.HIST_BAR)
+                m_len = int(m_pct / peak * self.HIST_BAR)
+                t.append(f"{lbl:>{label_w}} ", style=FG)
+                t.append("█" * s_len + "░" * (self.HIST_BAR - s_len), style=DIM)
+                t.append(f"{s_pct:4.0f}% ", style=DIM)
+                t.append("█" * m_len + "░" * (self.HIST_BAR - m_len), style=color)
+                t.append(f"{m_pct:4.0f}%\n", style=DIM)
+        return t
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back":
@@ -789,11 +831,18 @@ class DataSamplerApp(App):
     #run {{ margin-left: 2; }}
 
     /* report screen */
+    #report-main {{ height: 1fr; }}
     #report-panel {{
-        height: 1fr;
+        width: 55%;
         border: round {GREEN};
         border-title-color: {GREEN};
         padding: 0 2;
+    }}
+    #hist-panel {{
+        width: 45%;
+        border: round {CYAN};
+        border-title-color: {CYAN};
+        padding: 0 1;
     }}
     #report-actions {{ height: 3; padding: 0 2; }}
     #report-actions Button {{ margin-right: 2; }}

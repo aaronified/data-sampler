@@ -19,7 +19,12 @@ from __future__ import annotations
 __version__ = "3.0.1"
 
 from .io import SUPPORTED_EXTENSIONS, list_sheets, load_file, save_output
-from .report import format_distribution, format_stratification_report
+from .report import (
+    column_histogram_data,
+    format_column_histograms,
+    format_distribution,
+    format_stratification_report,
+)
 from .sampling import (
     SampleResult,
     find_stratification_columns,
@@ -44,6 +49,8 @@ __all__ = [
     "find_stratification_columns",
     "format_stratification_report",
     "format_distribution",
+    "column_histogram_data",
+    "format_column_histograms",
     "anonymize",
     "make_anonymizer",
     "AnonymizationPlan",

@@ -45,10 +45,14 @@ The TUI is a panel-based dashboard (think btop / lazydocker):
    bars, choose an anonymizer for it, and toggle whether it should be
    skipped when preserving statistical variety (stratification). Set the
    sample size, output folder, optional seed, and run.
-3. **Report screen** — side-by-side original-vs-sample distribution bars per
-   stratification column, the anonymization summary, and the output path.
+3. **Report screen** — the stratification comparison and anonymization summary
+   on the left, and a **column histograms** panel on the right showing every
+   column's source-vs-sample distribution (numeric columns share bin edges;
+   others use the source's top categories) so you can see at a glance how well
+   the sample preserved each column. The output path is shown too.
 
-Key bindings: `ctrl+r` run sample, `s` toggle stratification skip,
+Key bindings: `ctrl+r` run sample, `a` auto-suggest anonymizer types,
+`s` toggle stratification skip,
 `escape` back, `ctrl+q` quit.
 
 ## CLI (headless)
@@ -95,6 +99,9 @@ for s in ds.compute_stats(df):
 # representative sample; 'notes' never used for stratification
 result = ds.sample(df, 500, exclude_columns=["notes"], random_state=7)
 print(ds.format_stratification_report(df, result))
+
+# per-column source-vs-sample histograms (or ds.column_histogram_data for the raw numbers)
+print(ds.format_column_histograms(df, result.data))
 
 # anonymize chosen columns of the sample (consistent mapping, NaN preserved)
 anon = ds.anonymize(

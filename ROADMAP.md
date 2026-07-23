@@ -38,9 +38,12 @@ gets its own commit after tests pass and docs are updated.
   API + `suggest`/`assign`, CLI `--suggest`), or clicking in the TUI (with an
   `a` auto-suggest action). `suggest_type` infers a type per column from its
   stats. Types drive the anonymizers via `AnonymizationPlan.apply`.
-- [ ] **Block C — column-level histograms in the report screen.** Per-column
-  source-vs-sample distribution histograms on the report screen (and CLI
-  text output).
+- [x] **Block C — column-level histograms in the report screen.** Per-column
+  source-vs-sample distribution histograms (`column_histogram_data` /
+  `format_column_histograms`): numeric columns share bin edges, others use the
+  source's top categories, computed from the pre-anonymization sample. Shown
+  in a new right-hand panel on the TUI report screen and in a "COLUMN
+  DISTRIBUTIONS" section of the CLI output.
 
 ## Later
 

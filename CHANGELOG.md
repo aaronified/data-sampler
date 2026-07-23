@@ -20,6 +20,14 @@
   aren't misread as dates. New public API: `AnonymizationPlan`,
   `suggest_type`, `TYPE_OPTIONS`. CLI gains `--suggest`. The TUI columns
   table was reordered so the anonymizer/strat columns stay visible.
+- **Added column-level histograms** (`column_histogram_data`,
+  `format_column_histograms` in `report`): per-column source-vs-sample
+  distributions — numeric columns share bin edges, other columns use the
+  source's top categories — computed from the pre-anonymization sample so
+  they show how faithfully the sample preserved each column. Surfaced as a
+  new right-hand "column histograms" panel on the TUI report screen and a
+  "COLUMN DISTRIBUTIONS" section in the CLI output. New public API:
+  `column_histogram_data`, `format_column_histograms`.
 
 ## v3.0.1 — 2026-07-19
 

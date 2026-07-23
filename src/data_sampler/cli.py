@@ -18,7 +18,7 @@ from . import __version__
 from ._logging import get_logger
 from .anonymize import anonymize, make_anonymizer
 from .io import load_file, save_output
-from .report import format_stratification_report
+from .report import format_column_histograms, format_stratification_report
 from .sampling import sample
 
 log = get_logger(__name__)
@@ -184,6 +184,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Columns excluded from stratification: {', '.join(skip)}")
     if result.method == "stratified":
         print(format_stratification_report(df, result))
+
+    # per-column source-vs-sample histograms (only when a real sample was taken)
+    if len(result.data) < len(df):
+        hist = format_column_histograms(df, result.data)
+        if hist:
+            print(hist)
 
     data = result.data
     if spec:

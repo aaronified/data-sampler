@@ -1,4 +1,12 @@
-from data_sampler.report import format_distribution, format_stratification_report
+import numpy as np
+import pandas as pd
+
+from data_sampler.report import (
+    column_histogram_data,
+    format_column_histograms,
+    format_distribution,
+    format_stratification_report,
+)
 from data_sampler.sampling import sample
 
 
@@ -42,3 +50,56 @@ def test_format_distribution(demo_df):
     assert "North" in text
     assert "█" in text
     assert "%" in text
+
+
+# ── column histograms (source vs sample) ─────────────────────────────────────
+
+def test_column_histogram_data_numeric_shares_bins(demo_df):
+    result = sample(demo_df, 200, random_state=1)
+    data = column_histogram_data(demo_df, result.data)
+    by_name = {d["name"]: d for d in data}
+    score = by_name["score"]
+    assert score["kind"] == "numeric"
+    # 10 bins by default, labels aligned to counts, both series same length
+    assert len(score["labels"]) == 10
+    assert len(score["source_counts"]) == len(score["sample_counts"]) == 10
+    # numeric counts total the (finite) non-null values in each frame
+    assert sum(score["source_counts"]) == demo_df["score"].notna().sum()
+    assert sum(score["sample_counts"]) == len(result.data)
+
+
+def test_column_histogram_data_categorical_uses_source_top(demo_df):
+    result = sample(demo_df, 200, random_state=1)
+    data = column_histogram_data(demo_df, result.data)
+    region = next(d for d in data if d["name"] == "region")
+    assert region["kind"] == "categorical"
+    # labels are the source's categories, present in the sample too
+    assert set(region["labels"]) <= set(demo_df["region"].dropna().astype(str))
+    # percentages are within 0..100
+    assert all(0 <= p <= 100 for p in region["source_pct"])
+    assert all(0 <= p <= 100 for p in region["sample_pct"])
+
+
+def test_column_histogram_data_handles_all_nan_and_missing_cols():
+    src = pd.DataFrame({"a": [1.0, 2.0, np.nan], "b": ["x", "y", "z"]})
+    samp = pd.DataFrame({"a": [1.0], "b": ["x"]})
+    data = column_histogram_data(src, samp)
+    names = {d["name"] for d in data}
+    assert names == {"a", "b"}
+    # a source column absent from the sample is simply skipped
+    data2 = column_histogram_data(src, samp[["a"]])
+    assert {d["name"] for d in data2} == {"a"}
+
+
+def test_format_column_histograms_text(demo_df):
+    result = sample(demo_df, 200, random_state=1)
+    text = format_column_histograms(demo_df, result.data)
+    assert "COLUMN DISTRIBUTIONS" in text
+    assert "score" in text and "region" in text
+    assert "src" in text and "sam" in text
+    assert "█" in text and "%" in text
+
+
+def test_format_column_histograms_empty_when_no_columns():
+    empty = pd.DataFrame()
+    assert format_column_histograms(empty, empty) == ""

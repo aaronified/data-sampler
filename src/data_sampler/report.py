@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 
 from .sampling import SampleResult
+from .stats import _classify, _fmt_num
 
 BAR_WIDTH = 30  # max width of distribution bars
+HIST_BAR_WIDTH = 20  # max width of the per-column comparison histogram bars
 
 
 def format_distribution(df: pd.DataFrame, col: str, label: str = "Source") -> str:
@@ -29,6 +32,118 @@ def format_distribution(df: pd.DataFrame, col: str, label: str = "Source") -> st
         out.append(f"  {str(value):>{max_label_len}}  {bar}  {count:>6} ({pct:5.1f}%)")
 
     out.append(f"  {'─' * (max_label_len + BAR_WIDTH + 20)}")
+    return "\n".join(out)
+
+
+def column_histogram_data(
+    df_source: pd.DataFrame,
+    df_sample: pd.DataFrame,
+    bins: int = 10,
+    top: int = 8,
+) -> list[dict]:
+    """Per-column source-vs-sample distributions, aligned for comparison.
+
+    Returns one dict per column present in both frames::
+
+        {"name", "kind", "labels": [str],
+         "source_counts": [int], "sample_counts": [int],
+         "source_pct": [float], "sample_pct": [float]}
+
+    Numeric columns share bin edges (computed from the source) so the two
+    histograms line up bin-for-bin; other columns use the source's ``top``
+    most-frequent categories, looked up in the sample. Percentages are of each
+    frame's non-null count, so for categorical columns the shown bars may sum
+    to under 100 % when there are more than ``top`` categories.
+
+    Pass the *pre-anonymization* sample (``SampleResult.data``) so the numbers
+    describe how well the sample preserved the source distribution.
+    """
+    out: list[dict] = []
+    for col in df_source.columns:
+        if col not in df_sample.columns:
+            continue
+        src = df_source[col]
+        samp = df_sample[col]
+        kind = _classify(src)
+
+        if kind == "numeric":
+            s_src = pd.to_numeric(src, errors="coerce")
+            s_src = s_src[np.isfinite(s_src)]
+            s_samp = pd.to_numeric(samp, errors="coerce")
+            s_samp = s_samp[np.isfinite(s_samp)]
+            if len(s_src) == 0:
+                continue
+            edges = np.histogram_bin_edges(s_src, bins=bins)
+            source_counts = np.histogram(s_src, bins=edges)[0]
+            sample_counts = (
+                np.histogram(s_samp, bins=edges)[0]
+                if len(s_samp)
+                else np.zeros(len(source_counts), dtype=int)
+            )
+            labels = [
+                f"{_fmt_num(float(edges[i]))} – {_fmt_num(float(edges[i + 1]))}"
+                for i in range(len(source_counts))
+            ]
+        else:
+            src_vc = src.dropna().astype(str).value_counts()
+            if src_vc.empty:
+                continue
+            top_labels = list(src_vc.head(top).index)
+            samp_vc = samp.dropna().astype(str).value_counts()
+            source_counts = np.array([int(src_vc.get(l, 0)) for l in top_labels])
+            sample_counts = np.array([int(samp_vc.get(l, 0)) for l in top_labels])
+            labels = [str(l) for l in top_labels]
+
+        src_total = int(src.notna().sum()) or 1
+        samp_total = int(samp.notna().sum()) or 1
+        out.append(
+            {
+                "name": str(col),
+                "kind": kind,
+                "labels": labels,
+                "source_counts": [int(c) for c in source_counts],
+                "sample_counts": [int(c) for c in sample_counts],
+                "source_pct": [c / src_total * 100 for c in source_counts],
+                "sample_pct": [c / samp_total * 100 for c in sample_counts],
+            }
+        )
+    return out
+
+
+def format_column_histograms(
+    df_source: pd.DataFrame,
+    df_sample: pd.DataFrame,
+    bins: int = 10,
+    top: int = 8,
+) -> str:
+    """Text render of :func:`column_histogram_data`: per-column source-vs-sample
+    bars, so you can eyeball how each column's distribution held up."""
+    data = column_histogram_data(df_source, df_sample, bins=bins, top=top)
+    if not data:
+        return ""
+
+    out: list[str] = []
+    out.append("╔═════════════════════════════════════════════════════════════════════╗")
+    out.append("║                    COLUMN DISTRIBUTIONS (source → sample)           ║")
+    out.append("╚═════════════════════════════════════════════════════════════════════╝")
+
+    for d in data:
+        labels = d["labels"]
+        if not labels:
+            continue
+        label_w = min(20, max(len(l) for l in labels))
+        peak = max([*d["source_pct"], *d["sample_pct"], 1e-9])
+        out.append(f"\n  {d['name']}  ({d['kind']})")
+        for label, s_pct, m_pct in zip(labels, d["source_pct"], d["sample_pct"]):
+            lbl = label if len(label) <= label_w else label[: label_w - 1] + "…"
+            s_len = int(s_pct / peak * HIST_BAR_WIDTH)
+            m_len = int(m_pct / peak * HIST_BAR_WIDTH)
+            s_bar = "█" * s_len + "░" * (HIST_BAR_WIDTH - s_len)
+            m_bar = "█" * m_len + "░" * (HIST_BAR_WIDTH - m_len)
+            out.append(
+                f"  {lbl:>{label_w}}  src {s_bar} {s_pct:5.1f}%   "
+                f"sam {m_bar} {m_pct:5.1f}%"
+            )
     return "\n".join(out)
 
 
