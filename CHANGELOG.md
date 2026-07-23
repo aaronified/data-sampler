@@ -16,6 +16,26 @@
   `random_string`, `hex`) are bijective while jitter anonymizers
   (`numeric_jitter`, `datetime_jitter`) are bounded noise (distinct nearby
   values may collide).
+- **Added an optional DuckDB out-of-core engine** (`data_sampler.engine`,
+  Blocks P2–P4 of the v3.2 performance & scale effort): install
+  `pip install "data-sampler[large]"` to push loading, stratification, and
+  sampling into DuckDB instead of pandas. Multi-threaded (`PRAGMA threads`)
+  and memory-limited with spill-to-disk; reads CSV/TSV/JSON and Parquet
+  natively (Parquet with projection pushdown, the biggest I/O win) plus
+  pandas DataFrames — only the resulting sample is ever materialized.
+  Sampling: reservoir sampling for the random case (exact count, single
+  pass, reproducible via `REPEATABLE`) and two-pass proportional stratified
+  sampling, with auto-stratification picking low-cardinality columns via
+  HyperLogLog (`approx_count_distinct`). Seed-reproducible end to end
+  (seeded stratified runs go single-threaded, since DuckDB's `random()`
+  ordering is only reproducible that way); NaN strata are joined with
+  `IS NOT DISTINCT FROM` so they aren't silently dropped; column identifiers
+  are quoted against injection. New `should_use_engine` auto-selects the
+  engine for Parquet/large inputs, and `large_materialization_warning` warns
+  before loading a large dataset fully into pandas — the pandas path stays
+  the default for small/medium data. Adversarially verified across 4 review
+  lenses with zero findings; a 2M-row Parquet file sampled to 1000 rows in
+  ~1s, out-of-core.
 
 ## v3.1 — unreleased
 

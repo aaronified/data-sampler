@@ -155,6 +155,30 @@ Add an entry for every defect found by tests or manual runs.
   original dtype when it is a non-object string dtype (`is_string_dtype and not
   is_object_dtype`), wrapped in try/except so it never breaks a valid result.
 
+## DuckDB engine: design notes (P2 review)
+
+Not a failure — decisions the adversarial engine review confirmed, recorded so
+they are not "fixed" by mistake later:
+
+- **Seeded stratified sampling goes single-threaded.** DuckDB's `random()`
+  ordering is only reproducible with `threads=1`, so `_stratified` drops to one
+  thread when a `seed` is given and restores the configured thread count after.
+  Unseeded runs keep all cores; the distribution is preserved either way.
+  Reservoir (random) sampling stays parallel and reproducible via
+  `REPEATABLE(seed)`.
+- **NULL strata must join with `IS NOT DISTINCT FROM`.** A plain `=` join drops
+  NaN-stratum rows (NULL `=` NULL is NULL/false), silently shrinking the sample
+  and losing a whole category. The engine joins the allocation table with
+  `IS NOT DISTINCT FROM`, verified to sample the NaN stratum proportionally with
+  no dropped rows.
+- **Column identifiers are quoted (`_quote_ident`, doubles embedded quotes).**
+  Hostile column names (`"; DROP TABLE x;--`, names with spaces, unicode) sample
+  without error and are preserved — do not interpolate raw names into SQL.
+- **`_proportional_allocation` cannot over-allocate.** In the `count < total`
+  regime each stratum's proportional share is `< its size`, so `floor + largest
+  remainder` never exceeds the stratum size (a `np.minimum` clamp guards the
+  edge); the allocations always sum to exactly `count`.
+
 ## Template
 
 - **Symptom:** what was observed.

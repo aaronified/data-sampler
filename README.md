@@ -283,6 +283,42 @@ category. A side-by-side distribution report is produced for every run.
 If no suitable stratification columns exist, the tool falls back to pure
 random sampling automatically.
 
+## Large data: the out-of-core DuckDB engine
+
+The default pandas path loads the whole file into memory. For inputs that are
+too big for that (toward billions of rows, especially Parquet), install the
+optional engine and let **DuckDB** do the work — multi-threaded, and able to
+spill to disk, so only the resulting sample is ever materialized:
+
+```sh
+pip install "data-sampler[large]"
+```
+
+```python
+from data_sampler.engine import DuckDBEngine, should_use_engine
+
+# reads Parquet/CSV natively; only the sample (count rows) comes back as a DataFrame
+with DuckDBEngine(threads=8, memory_limit="8GB") as engine:
+    result = engine.sample("huge.parquet", 10_000, seed=42)   # stratifies automatically
+    result.data.to_parquet("sample.parquet", index=False)
+
+should_use_engine("huge.parquet")   # True — Parquet always benefits from pushdown
+```
+
+- **Parallel + out-of-core:** all cores by default; a `memory_limit` makes it
+  spill instead of running out of memory.
+- **Native readers:** Parquet is read with projection pushdown (only the scanned
+  columns); CSV/TSV/JSON and pandas DataFrames work too. Excel still goes through
+  the pandas path.
+- **Streaming sampling:** reservoir sampling for the random case (exact count,
+  single pass) and two-pass proportional sampling for the stratified case.
+- **Reproducible:** pass `seed=` (seeded stratified runs go single-threaded so
+  the result is deterministic; the distribution is preserved either way).
+
+`large_materialization_warning(n_rows, n_cols)` returns a heads-up when a dataset
+is big enough that loading it fully into pandas may exhaust memory — Parquet in
+particular expands well beyond its compressed on-disk size.
+
 ## Supported formats
 
 | Format | Extensions |

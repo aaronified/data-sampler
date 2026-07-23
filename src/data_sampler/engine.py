@@ -1,0 +1,395 @@
+"""DuckDB-backed out-of-core engine for large inputs.
+
+Optional — install the extra: ``pip install "data-sampler[large]"``.
+
+The pandas path (:mod:`data_sampler.sampling`) loads the whole file into memory
+and is the default for small/medium data. This engine instead pushes loading,
+stratification, and sampling **into DuckDB**: vectorized, multi-threaded, and
+able to spill to disk, so inputs far larger than RAM can be sampled without ever
+materializing them in pandas. Only the resulting sample (``count`` rows) comes
+back as a DataFrame.
+
+Highlights:
+
+- **Parallelism** — ``PRAGMA threads`` uses all cores by default.
+- **Out-of-core** — a memory limit plus a temp directory let DuckDB spill.
+- **Native readers** — CSV/TSV/JSON and, especially, Parquet are read directly
+  with projection pushdown (only the needed columns are scanned).
+- **Streaming sampling** — reservoir sampling for the random case (exact count,
+  single pass) and window-based proportional sampling for the stratified case.
+
+This module imports :mod:`duckdb` lazily, so importing it never fails just
+because the optional dependency is absent — only *using* the engine does, with a
+clear message.
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+
+from ._logging import get_logger
+from .sampling import SampleResult
+
+log = get_logger(__name__)
+
+# Above this row count the engine is a good idea and materializing the whole
+# thing in pandas risks exhausting memory (used for auto-selection + warnings).
+LARGE_ROW_THRESHOLD = 5_000_000
+
+# extensions DuckDB can read natively (no pandas round-trip)
+_NATIVE_READERS = (".csv", ".tsv", ".json", ".parquet")
+
+
+class DuckDBUnavailable(RuntimeError):
+    """Raised when the DuckDB engine is used without the optional dependency."""
+
+
+def _require_duckdb():
+    try:
+        import duckdb  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - exercised without the extra
+        raise DuckDBUnavailable(
+            "The DuckDB engine needs the optional 'large' extra. Install it with:"
+            "  pip install \"data-sampler[large]\""
+        ) from exc
+    return duckdb
+
+
+def _quote_ident(name: str) -> str:
+    """Quote a SQL identifier (column name), escaping embedded quotes."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _quote_str(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _proportional_allocation(sizes: np.ndarray, count: int) -> np.ndarray:
+    """Largest-remainder proportional allocation summing exactly to ``count``.
+
+    Mirrors :func:`data_sampler.sampling.stratified_sample` so the DuckDB path
+    allocates strata identically to the pandas path.
+    """
+    sizes = np.asarray(sizes, dtype=float)
+    total = sizes.sum()
+    if total <= 0:
+        return np.zeros(len(sizes), dtype=np.int64)
+    exact = sizes / total * count
+    alloc = np.floor(exact).astype(np.int64)
+    shortfall = int(count - alloc.sum())
+    if shortfall > 0:
+        # hand the remaining slots to the largest fractional remainders
+        order = np.argsort(-(exact - alloc), kind="stable")
+        alloc[order[:shortfall]] += 1
+    # never allocate a stratum more rows than it has
+    return np.minimum(alloc, sizes.astype(np.int64))
+
+
+class DuckDBEngine:
+    """A configured DuckDB connection with sampling/stats helpers.
+
+    ``threads`` defaults to all CPU cores; ``memory_limit`` (e.g. ``"8GB"``)
+    caps RAM so DuckDB spills to ``temp_directory`` instead of OOM-ing.
+    Use as a context manager to close the connection.
+    """
+
+    def __init__(
+        self,
+        threads: int | None = None,
+        memory_limit: str | None = None,
+        temp_directory: str | None = None,
+    ):
+        duckdb = _require_duckdb()
+        self.con = duckdb.connect(":memory:")
+        self.threads = int(threads) if threads else (os.cpu_count() or 4)
+        self.con.execute(f"PRAGMA threads={self.threads}")
+        if memory_limit:
+            self.con.execute(f"PRAGMA memory_limit={_quote_str(memory_limit)}")
+        self.con.execute(
+            f"PRAGMA temp_directory={_quote_str(temp_directory or tempfile.gettempdir())}"
+        )
+        self._reg = 0
+        log.info("DuckDBEngine ready (threads=%d, memory_limit=%s)", self.threads, memory_limit)
+
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        self.con.close()
+
+    def __enter__(self) -> "DuckDBEngine":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    # ── source resolution ─────────────────────────────────────────────────────
+
+    def _source_sql(self, source) -> str:
+        """Return a SQL table expression for ``source``.
+
+        ``source`` may be a path (CSV/TSV/JSON/Parquet, read natively) or a
+        pandas DataFrame (registered zero-copy via Arrow).
+        """
+        if isinstance(source, pd.DataFrame):
+            self._reg += 1
+            name = f"_src_df_{self._reg}"
+            self.con.register(name, source)
+            return name
+        p = Path(source)
+        ext = p.suffix.lower()
+        path = _quote_str(str(p))
+        if ext == ".parquet":
+            return f"read_parquet({path})"
+        if ext == ".csv":
+            return f"read_csv({path}, header=true, auto_detect=true)"
+        if ext == ".tsv":
+            return f"read_csv({path}, header=true, auto_detect=true, delim='\t')"
+        if ext == ".json":
+            return f"read_json_auto({path})"
+        raise ValueError(
+            f"DuckDB engine cannot read '{ext}' natively; supported: "
+            f"{', '.join(_NATIVE_READERS)} (or pass a pandas DataFrame)"
+        )
+
+    # ── introspection ─────────────────────────────────────────────────────────
+
+    def row_count(self, source) -> int:
+        src = self._source_sql(source)
+        return int(self.con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+
+    def columns(self, source) -> list[str]:
+        src = self._source_sql(source)
+        rel = self.con.execute(f"SELECT * FROM {src} LIMIT 0")
+        return [d[0] for d in rel.description]
+
+    def _set_seed(self, seed: int | None) -> None:
+        if seed is not None:
+            # setseed wants a value in [-1, 1]; map the int deterministically
+            self.con.execute(f"SELECT setseed({(int(seed) % 1000) / 1000.0})")
+
+    # ── stratification-column selection ───────────────────────────────────────
+
+    def find_stratification_columns(
+        self, source, sample_count: int, exclude: Iterable[str] = ()
+    ) -> list[str]:
+        """Pick low-cardinality columns to stratify on, using approximate
+        distinct counts (HyperLogLog) so it stays cheap on huge inputs."""
+        exclude = set(exclude)
+        src = self._source_sql(source)
+        n_rows = int(self.con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+        info = self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()
+        cols = [(r[0], str(r[1]).lower()) for r in info if r[0] not in exclude]
+        if not cols:
+            return []
+
+        # one pass: approx distinct per column (HLL) + avg text length for strings
+        parts = []
+        for name, dtype in cols:
+            q = _quote_ident(name)
+            parts.append(f"approx_count_distinct({q}) AS {_quote_ident(name + '::nd')}")
+            if any(t in dtype for t in ("char", "varchar", "text", "string")):
+                parts.append(
+                    f"avg(length(CAST({q} AS VARCHAR))) AS {_quote_ident(name + '::len')}"
+                )
+        row = self.con.execute(f"SELECT {', '.join(parts)} FROM {src}").fetchdf().iloc[0]
+
+        candidates: list[tuple[str, int]] = []
+        for name, dtype in cols:
+            n_unique = int(row[name + "::nd"] or 0)
+            if n_unique < 2 or n_unique > min(100, n_rows * 0.5):
+                continue
+            is_numeric = any(
+                t in dtype for t in ("int", "decimal", "double", "float", "real", "hugeint")
+            )
+            if is_numeric and n_unique > min(20, n_rows * 0.3):
+                continue
+            if (name + "::len") in row and (row[name + "::len"] or 0) > 50:
+                continue
+            candidates.append((name, n_unique))
+
+        candidates.sort(key=lambda x: x[1])  # fewest categories first
+        selected: list[str] = []
+        combo = 1
+        for name, n_unique in candidates:
+            if combo * n_unique > sample_count:
+                break
+            combo *= n_unique
+            selected.append(name)
+        log.debug("engine stratification columns: %s", selected)
+        return selected
+
+    # ── sampling ──────────────────────────────────────────────────────────────
+
+    def sample(
+        self,
+        source,
+        count: int,
+        use_random: bool = False,
+        exclude_columns: Iterable[str] = (),
+        strat_cols: list[str] | None = None,
+        seed: int | None = None,
+    ) -> SampleResult:
+        """Draw ``count`` rows out-of-core, returning a :class:`SampleResult`.
+
+        Stratifies automatically (unless ``use_random``) on suitable columns;
+        pass ``strat_cols`` to force a set. Only the sample is materialized.
+        """
+        src = self._source_sql(source)
+        total = int(self.con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+        log.info("engine sampling %d of %d rows (random=%s)", count, total, use_random)
+
+        if count >= total:
+            data = self.con.execute(f"SELECT * FROM {src}").df()
+            return SampleResult(
+                data=data, method="all", requested=count,
+                notes=[f"Requested {count} rows but source has {total}. Returning all rows."],
+            )
+
+        self._set_seed(seed)
+
+        if use_random:
+            return self._reservoir(src, count, seed)
+
+        if strat_cols is None:
+            strat_cols = self.find_stratification_columns(source, count, exclude_columns)
+        if not strat_cols:
+            result = self._reservoir(src, count, seed)
+            result.notes = ["No suitable stratification columns found; using reservoir sampling."]
+            return result
+
+        return self._stratified(src, count, strat_cols, seed)
+
+    def _reservoir(self, src: str, count: int, seed: int | None) -> SampleResult:
+        rep = f" REPEATABLE ({int(seed)})" if seed is not None else ""
+        data = self.con.execute(
+            f"SELECT * FROM {src} USING SAMPLE reservoir({int(count)} ROWS){rep}"
+        ).df()
+        return SampleResult(
+            data=data, method="random", requested=count,
+            notes=["Mode: DuckDB reservoir sampling (out-of-core)"],
+        )
+
+    def _stratified(
+        self, src: str, count: int, strat_cols: list[str], seed: int | None
+    ) -> SampleResult:
+        cols_sql = ", ".join(_quote_ident(c) for c in strat_cols)
+        # pass 1: stratum sizes (small — one row per stratum)
+        group_df = self.con.execute(
+            f"SELECT {cols_sql}, count(*) AS _n FROM {src} GROUP BY {cols_sql}"
+        ).df()
+        allocations = _proportional_allocation(group_df["_n"].to_numpy(), count)
+        group_df["_alloc"] = allocations
+
+        # pass 2: proportional per-stratum sampling. row_number over a random
+        # order per partition, keep the first _alloc of each stratum. DuckDB
+        # parallelizes the partitions and spills if needed.
+        alloc_tbl = f"_alloc_{self._reg}"
+        self._reg += 1
+        self.con.register(alloc_tbl, group_df)
+        join_on = " AND ".join(
+            f"r.{_quote_ident(c)} IS NOT DISTINCT FROM a.{_quote_ident(c)}"
+            for c in strat_cols
+        )
+        query = f"""
+            WITH ranked AS (
+                SELECT *, row_number() OVER (
+                    PARTITION BY {cols_sql} ORDER BY random()
+                ) AS _rn
+                FROM {src}
+            )
+            SELECT r.* EXCLUDE (_rn)
+            FROM ranked r
+            JOIN {alloc_tbl} a ON {join_on}
+            WHERE r._rn <= a._alloc
+        """
+        # DuckDB's random() ordering is only reproducible single-threaded, so a
+        # seeded run goes single-threaded for determinism; unseeded runs keep all
+        # cores (the distribution is preserved either way).
+        reproducible = seed is not None
+        if reproducible:
+            self.con.execute("PRAGMA threads=1")
+            self._set_seed(seed)
+        try:
+            data = self.con.execute(query).df()
+        finally:
+            if reproducible:
+                self.con.execute(f"PRAGMA threads={self.threads}")
+
+        group_sizes = group_df.set_index(strat_cols)["_n"]
+        alloc_series = group_df.set_index(strat_cols)["_alloc"]
+        return SampleResult(
+            data=data, method="stratified", requested=count,
+            strat_cols=list(strat_cols), group_sizes=group_sizes, allocations=alloc_series,
+            notes=[f"Stratifying on columns (DuckDB, out-of-core): {list(strat_cols)}"],
+        )
+
+
+# ── module-level conveniences ──────────────────────────────────────────────────
+
+
+def duckdb_available() -> bool:
+    """Whether the optional DuckDB dependency is importable."""
+    try:
+        import duckdb  # noqa: F401, PLC0415
+        return True
+    except ImportError:
+        return False
+
+
+def should_use_engine(source, row_threshold: int = LARGE_ROW_THRESHOLD) -> bool:
+    """Heuristic for auto-selecting the DuckDB engine: Parquet inputs (always a
+    win via pushdown) or files large enough that pandas would strain."""
+    if not duckdb_available():
+        return False
+    if isinstance(source, pd.DataFrame):
+        return len(source) >= row_threshold
+    ext = Path(source).suffix.lower()
+    if ext == ".parquet":
+        return True
+    try:
+        # rough gate on file size (bytes) as a proxy for row count
+        return os.path.getsize(source) >= row_threshold * 20
+    except OSError:
+        return False
+
+
+def large_materialization_warning(
+    n_rows: int, n_cols: int, row_threshold: int = LARGE_ROW_THRESHOLD
+) -> str | None:
+    """A warning to show before loading a big source fully into pandas.
+
+    Parquet compresses hard on disk, so a modest file can explode in memory —
+    surface the speedbump and point at the out-of-core engine.
+    """
+    if n_rows >= row_threshold:
+        return (
+            f"{n_rows:,} rows x {n_cols} columns is large: loading it fully into "
+            "pandas may exhaust memory (Parquet especially expands well beyond its "
+            "on-disk size). The DuckDB engine samples it out-of-core without "
+            "materializing the whole dataset."
+        )
+    return None
+
+
+def sample(
+    source,
+    count: int,
+    use_random: bool = False,
+    exclude_columns: Iterable[str] = (),
+    strat_cols: list[str] | None = None,
+    seed: int | None = None,
+    threads: int | None = None,
+    memory_limit: str | None = None,
+) -> SampleResult:
+    """Convenience: open a :class:`DuckDBEngine`, sample ``source``, close it."""
+    with DuckDBEngine(threads=threads, memory_limit=memory_limit) as engine:
+        return engine.sample(
+            source, count, use_random=use_random,
+            exclude_columns=exclude_columns, strat_cols=strat_cols, seed=seed,
+        )

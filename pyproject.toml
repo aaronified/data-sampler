@@ -32,9 +32,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# out-of-core / large-data engine (DuckDB): parallel, spills to disk, reads
+# CSV/Parquet natively. Optional so the default install stays lean.
+large = [
+    "duckdb>=1.0",
+]
 dev = [
     "pytest>=7",
     "build",
+    "duckdb>=1.0",
 ]
 
 [project.scripts]
