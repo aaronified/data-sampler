@@ -88,6 +88,38 @@ Add an entry for every defect found by tests or manual runs.
   format" warning and are parsed per-element (slower). Columns that cannot be
   parsed as dates raise `TypeError`.
 
+## suggest_type missed CSV date columns (loaded as strings)
+
+- **Symptom:** the anonymization workflow's auto-suggest returned ``none`` for
+  obvious date columns (e.g. ``signup_date``) instead of ``datetime_jitter``.
+- **Cause:** ``load_file`` reads CSVs with a plain ``pd.read_csv`` (no
+  ``parse_dates``), so date columns arrive as strings (``StringDtype`` under
+  pandas 3.0) and classify as ``categorical``. The first draft of
+  ``suggest_type`` only mapped the datetime *dtype* to ``datetime_jitter``, so
+  string-typed dates were never caught.
+- **Fix:** added a column-*name* date heuristic (``_has_date_token``) that
+  fires for categorical/text columns whose name has a date-ish token
+  (``signup_date``, ``created_at``, ``date_of_birth``). It matches per token
+  (equality/prefix), not bare substring, so ``candidate``/``mandate``/
+  ``update_reason`` are **not** misread as dates, and it is skipped for numeric
+  columns so a ``birth_year`` integer stays ``numeric_jitter``.
+  ``DatetimeJitterAnonymizer`` already coerces the strings via
+  ``pd.to_datetime`` when the suggestion is applied.
+
+## Auto-suggested anonymizer types were invisible in the TUI table
+
+- **Symptom:** pressing ``a`` (auto-suggest) on the columns screen changed
+  nothing visible in the stats table; only the config panel and a toast
+  updated. Screenshot verification confirmed the ``anonymizer`` and ``strat``
+  table columns were clipped off the right edge at a normal terminal width.
+- **Cause:** those two columns were added last, after the wide
+  ``distribution`` and ``summary`` columns, so they fell past the 58%-wide
+  columns panel's clip edge.
+- **Fix:** reordered the ``DataTable`` columns to
+  ``column · type · anonymizer · strat · miss% · uniq · distribution ·
+  summary`` (and the matching ``_row_cells`` order) so the actionable columns
+  stay visible; ``distribution``/``summary`` trail them.
+
 ## Template
 
 - **Symptom:** what was observed.

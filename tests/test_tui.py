@@ -130,6 +130,29 @@ def test_toggle_skip_action(csv_file):
     run(go())
 
 
+def test_auto_suggest_action_fills_column_types(csv_file):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(140, 45)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            # nothing configured yet
+            assert all(cfg.kind == "none" for cfg in screen.configs.values())
+            screen.action_suggest()
+            await pilot.pause()
+            # id-like numeric, name column, numeric score, free text → typed;
+            # low-cardinality categoricals left as none
+            assert screen.configs["name"].kind == "names"
+            assert screen.configs["score"].kind == "numeric_jitter"
+            assert screen.configs["id"].kind == "sequential_id"
+            assert screen.configs["notes"].kind == "random_string"
+            assert screen.configs["region"].kind == "none"
+            # the config panel reflects the suggestion for the selected column
+            sel = screen.selected
+            assert screen.query_one("#anon-kind", Select).value == screen.configs[sel].kind
+
+    run(go())
+
+
 # ── pure helpers (no app needed) ─────────────────────────────────────────────
 
 def test_build_anonymizer_parses_option_strings():

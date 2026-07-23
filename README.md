@@ -65,6 +65,8 @@ data-sampler <source> <count> [options]
 | `--seed N` | Seed for reproducible sampling and anonymization |
 | `--skip COL[,COL]` | Exclude column(s) from stratification (repeatable) |
 | `--anon COL=KIND[:k=v,...]` | Anonymize a column (repeatable) |
+| `-i`, `--interactive` | Guided workflow: choose an anonymizer type per column from a menu |
+| `--suggest` | Auto-assign a suggested anonymizer type to each column from its stats |
 | `--tui` | Open the TUI (optionally preloading `source`) |
 
 Examples:
@@ -130,9 +132,10 @@ E1003,Donald Martin,donald.martin003@example.com,Operations,East,Contract,3,6850
 data-sampler examples/employees.csv --tui
 ```
 
-The columns screen opens with the stats table. Try: select `full_name` and
-set its anonymizer to **names**; select `employee_id` and choose
-**sequential id** (start 1000); select `salary` and choose **numeric
+The columns screen opens with the stats table. Try: press **`a`** to
+auto-suggest an anonymizer type for every column, then adjust — select
+`full_name` and set its anonymizer to **names**; select `employee_id` and
+choose **sequential id** (start 1000); select `salary` and choose **numeric
 jitter**; select `performance_rating` and flip **skip when stratifying** to
 keep it out of the variety-preservation logic. Set rows to `100`, seed to
 `42`, and press `ctrl+r` — the report screen shows how closely the sample
@@ -225,6 +228,38 @@ Missing values are left as missing. All anonymizers accept a seed (via
 | `datetime_jitter` | A date/time shifted by a random offset within ±`max_delta` | `max_delta` (`"7D"`; any `pandas.Timedelta` string), `unit` (`"s"`; jitter resolution) |
 | `random_string` | Random character sequences, unique per value | `length` (8), `charset` (`alphanumeric`, `letters`, `digits`, `hex`), `prefix` (`""`) |
 | `hex` | Shorthand for `random_string` with `charset="hex"` | `length` (8) |
+
+## Anonymization workflow
+
+Rather than spell out every column by hand, you can drive a guided workflow —
+give it your columns and pick a *type* for each. The three ways to do it share
+one engine (`AnonymizationPlan`) and the same auto-suggestion (`suggest_type`),
+which infers a type from each column's stats (datetime → datetime jitter,
+name/email columns → names/hex, id-ish high-uniqueness columns → sequential id,
+numbers → numeric jitter, free text → random string; categorical/boolean columns
+are left alone so the categories you stratify on survive).
+
+- **Choose from options (interactive):** `data-sampler data.csv 100 --interactive`
+  walks each column and offers a numbered menu, defaulting to the suggested
+  type — press Enter to accept or type a number to override.
+- **Pre-specify through a function (Python):**
+
+  ```python
+  import data_sampler as ds
+
+  df = ds.load_file("data.csv")
+  plan = ds.AnonymizationPlan.suggest(df)          # auto-infer every column…
+  plan.assign("salary", "numeric_jitter", pct=0.1) # …then override as needed
+  plan.clear("region")
+  anon = plan.apply(df, seed=7)                     # runs ds.anonymize under the hood
+  ```
+
+- **Click in the TUI:** open the columns screen, select a column, and pick its
+  anonymizer — or press **`a`** to auto-suggest a type for every column at once,
+  then tweak. The `anonymizer` column shows each choice at a glance.
+
+`--suggest` applies the suggestions non-interactively (columns you also set with
+`--anon` keep your explicit choice).
 
 ## How sampling works
 

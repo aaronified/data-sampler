@@ -91,6 +91,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "-i", "--interactive", action="store_true",
+        help=(
+            "guided anonymization workflow: choose a type for each column from "
+            "a menu (seeded by any --anon flags and per-column suggestions)"
+        ),
+    )
+    parser.add_argument(
+        "--suggest", action="store_true",
+        help=(
+            "auto-assign a suggested anonymizer type to each column from its "
+            "stats (columns set via --anon are left as given)"
+        ),
+    )
+    parser.add_argument(
         "--tui", action="store_true",
         help="open the TUI (optionally preloading SOURCE)",
     )
@@ -120,15 +134,41 @@ def main(argv: list[str] | None = None) -> int:
     df = load_file(args.source, sheet=args.sheet)
     print(f"Loaded {len(df)} rows, {len(df.columns)} columns from {args.source}")
 
-    spec = {}
+    # parse explicit --anon flags into (column, kind, options) triples
+    anon_specs: list[tuple[str, str, dict]] = []
     for raw in args.anon:
         try:
             col, kind, options = parse_anon_option(raw)
             if col not in df.columns:
                 raise ValueError(f"column {col!r} not found in file")
-            spec[col] = make_anonymizer(kind, **options)
+            anon_specs.append((col, kind, options))
         except (ValueError, TypeError) as exc:
             parser.error(f"--anon {raw!r}: {exc}")
+
+    if args.interactive or args.suggest:
+        from .workflow import AnonymizationPlan
+
+        plan = AnonymizationPlan.for_columns(df.columns)
+        try:
+            for col, kind, options in anon_specs:
+                plan.assign(col, kind, **options)
+        except (ValueError, TypeError) as exc:
+            parser.error(f"--anon: {exc}")
+        if args.suggest:
+            suggested = AnonymizationPlan.suggest(df)
+            for col in df.columns:
+                if plan.type_of(col) == "none":
+                    plan.assignments[col] = suggested.assignments[col]
+        if args.interactive:
+            plan.choose_interactively(df)
+        spec = plan.build_spec()
+    else:
+        spec = {}
+        for col, kind, options in anon_specs:
+            try:
+                spec[col] = make_anonymizer(kind, **options)
+            except (ValueError, TypeError) as exc:
+                parser.error(f"--anon {col}={kind}: {exc}")
 
     skip = [c.strip() for chunk in args.skip for c in chunk.split(",") if c.strip()]
 

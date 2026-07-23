@@ -46,6 +46,9 @@ __all__ = [
     "format_distribution",
     "anonymize",
     "make_anonymizer",
+    "AnonymizationPlan",
+    "suggest_type",
+    "TYPE_OPTIONS",
     "run_tui",
 ]
 
@@ -60,6 +63,11 @@ def __getattr__(name: str):
 
         _anon = importlib.import_module(".anonymize", __name__)
         return getattr(_anon, name)
+    if name in ("AnonymizationPlan", "suggest_type", "TYPE_OPTIONS"):
+        import importlib
+
+        _wf = importlib.import_module(".workflow", __name__)
+        return getattr(_wf, name)
     if name == "run_tui":
         from .tui import run_tui
 

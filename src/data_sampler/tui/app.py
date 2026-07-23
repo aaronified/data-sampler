@@ -248,6 +248,7 @@ class ColumnsScreen(Screen):
 
     BINDINGS = [
         Binding("ctrl+r", "run", "run sample"),
+        Binding("a", "suggest", "auto-suggest types"),
         Binding("s", "toggle_skip", "toggle strat skip"),
         Binding("escape", "back", "back to file"),
     ]
@@ -363,10 +364,12 @@ class ColumnsScreen(Screen):
         table = self.query_one("#columns-table", DataTable)
         table.cursor_type = "row"
         table.zebra_stripes = True
+        # actionable columns (anonymizer, strat) come right after type so they
+        # stay visible; the wider distribution/summary columns trail them
         self._col_keys = list(
             table.add_columns(
-                "column", "type", "miss%", "uniq", "distribution", "summary",
-                "anonymizer", "strat",
+                "column", "type", "anonymizer", "strat",
+                "miss%", "uniq", "distribution", "summary",
             )
         )
         for name in self.configs:
@@ -392,12 +395,12 @@ class ColumnsScreen(Screen):
         return [
             Text(name, style=f"bold {FG}"),
             Text(s.kind, style=color),
+            Text(anon_label(cfg), style=GREEN if cfg.kind != "none" else DIM),
+            strat,
             Text(f"{s.missing_pct:.1f}", style=miss_style, justify="right"),
             Text(f"{s.unique:,}", style=FG, justify="right"),
             Text(sparkline(s.histogram), style=color),
             Text(s.summary(), style=DIM),
-            Text(anon_label(cfg), style=GREEN if cfg.kind != "none" else DIM),
-            strat,
         ]
 
     def _refresh_row(self, name: str) -> None:
@@ -543,6 +546,26 @@ class ColumnsScreen(Screen):
         cfg.skip_strat = not cfg.skip_strat
         self._sync_config_panel(self.selected)
         self._refresh_row(self.selected)
+
+    def action_suggest(self) -> None:
+        """Auto-assign a suggested anonymizer type to every column."""
+        from ..workflow import suggest_type
+
+        changed = 0
+        for name, stats in self.stats.items():
+            kind = suggest_type(stats)
+            cfg = self.configs[name]
+            if cfg.kind != kind:
+                cfg.kind = kind
+                cfg.options = {}
+                changed += 1
+            self._refresh_row(name)
+        if self.selected is not None:
+            self._sync_config_panel(self.selected)
+        self.notify(
+            f"suggested anonymizer types ({changed} column(s) changed)",
+            timeout=3,
+        )
 
     def action_back(self) -> None:
         self.app.pop_screen()

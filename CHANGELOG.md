@@ -10,6 +10,16 @@
   zone. Raises `ValueError` if the window is finer than its `unit`. Reachable
   as kinds `datetime_jitter` / `datetime` / `dates`, and wired into the CLI
   `--anon` option and the TUI anonymizer config panel.
+- **Added a guided anonymization workflow** (`data_sampler.workflow`): an
+  `AnonymizationPlan` maps each column to a "type" (anonymizer), buildable
+  three ways — programmatically (`assign`/`suggest`), interactively via a
+  menu wizard (`choose_interactively`, CLI `-i`/`--interactive`), or by
+  clicking in the TUI (new `a` auto-suggest action). `suggest_type` infers a
+  type per column from its stats, including date-named string columns →
+  `datetime_jitter`, using token-based matching so "candidate"/"mandate"
+  aren't misread as dates. New public API: `AnonymizationPlan`,
+  `suggest_type`, `TYPE_OPTIONS`. CLI gains `--suggest`. The TUI columns
+  table was reordered so the anonymizer/strat columns stay visible.
 
 ## v3.0.1 — 2026-07-19
 

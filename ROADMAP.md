@@ -31,10 +31,13 @@ gets its own commit after tests pass and docs are updated.
   within a ±window (±7 days by default), consistent-mapping preserved, NaT
   untouched, string-date columns coerced, timezones kept. Wired into the CLI
   (`--anon "col=datetime_jitter:max_delta=30D"`) and the TUI config panel.
-- [ ] **Block B — anonymiser workflow.** A guided column-type workflow: name
-  a set of columns, then assign each a type by choosing from options
-  (interactive wizard), pre-specifying through a function (`AnonymizationPlan`
-  API + `suggest`), or clicking in the TUI. Types drive the anonymizers.
+- [x] **Block B — anonymiser workflow.** A guided column-type workflow
+  (`data_sampler.workflow`): name a set of columns, then assign each a type by
+  choosing from options (interactive `choose_interactively` wizard, CLI
+  `--interactive`), pre-specifying through a function (`AnonymizationPlan`
+  API + `suggest`/`assign`, CLI `--suggest`), or clicking in the TUI (with an
+  `a` auto-suggest action). `suggest_type` infers a type per column from its
+  stats. Types drive the anonymizers via `AnonymizationPlan.apply`.
 - [ ] **Block C — column-level histograms in the report screen.** Per-column
   source-vs-sample distribution histograms on the report screen (and CLI
   text output).

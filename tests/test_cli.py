@@ -58,6 +58,30 @@ def test_cli_anonymize_and_skip(csv_file, capsys):
     assert df["id"].min() >= 1000
 
 
+def test_cli_suggest_auto_anonymizes(csv_file, capsys):
+    # --suggest assigns anonymizer types from column stats without prompting
+    code = main([str(csv_file), "50", "--seed", "1", "--suggest"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Anonymized columns" in out
+    df = pd.read_csv(csv_file.parent / "data_sample_50_anon.csv")
+    # name column suggested → names (no longer "Person N")
+    assert not df["name"].str.startswith("Person").any()
+    # low-cardinality categoricals are left untouched by suggestion
+    assert set(df["region"].dropna()).issubset({"North", "South", "East", "West"})
+
+
+def test_cli_suggest_keeps_explicit_anon(csv_file, capsys):
+    # explicit --anon wins over the suggestion for that column
+    code = main([
+        str(csv_file), "40", "--seed", "2", "--suggest",
+        "--anon", "id=sequential_id:start=9000",
+    ])
+    assert code == 0
+    df = pd.read_csv(csv_file.parent / "data_sample_40_anon.csv")
+    assert df["id"].min() >= 9000
+
+
 def test_cli_random_mode(csv_file, capsys):
     assert main([str(csv_file), "30", "--random"]) == 0
     assert "random" in capsys.readouterr().out.lower()
