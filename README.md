@@ -367,6 +367,82 @@ The pandas path on the same file: 5.6 s total while materializing a ~0.9 GB
 frame in RAM — the engine's reservoir sampling is ~50× faster and never
 materializes the source at all.
 
+## How it scales: the algorithms
+
+Every trick used to handle millions-to-billions of rows and thousands of
+columns, in one place.
+
+### Millions (to billions) of rows
+
+- **Out-of-core execution.** With the DuckDB engine, loading, stratification,
+  and sampling run inside a vectorized, multi-threaded SQL engine with a
+  memory limit and a temp directory — it spills to disk instead of OOM-ing,
+  and only the resulting sample ever becomes a DataFrame.
+- **Reservoir sampling** for the random case: a single streaming pass with
+  O(sample size) memory, an exact row count, and `REPEATABLE(seed)`
+  reproducibility that is independent of the file format and thread count.
+- **Two-pass stratified sampling.** Pass 1 is a `GROUP BY` over the
+  stratification columns — one row per stratum, tiny regardless of source
+  size. Largest-remainder proportional allocation is computed on that tiny
+  table in numpy. Pass 2 ranks rows per stratum with
+  `row_number() OVER (PARTITION BY strata ORDER BY random())` and keeps the
+  first *allocation* rows of each, joining the allocation table with
+  `IS NOT DISTINCT FROM` so missing-value strata are sampled too. DuckDB
+  parallelizes the partitions and spills the window sort if needed.
+- **Parquet projection pushdown.** Pass 1 and the stats queries touch only
+  the columns they reference, so a wide Parquet file is never read in full.
+- **Determinism engineering.** DuckDB's `GROUP BY` output order is
+  nondeterministic, so the stratum order is pinned with `ORDER BY … NULLS
+  LAST` before allocation (otherwise remainder ties break differently run to
+  run); seeded stratified runs drop to a single thread because `random()`
+  ordering is only reproducible that way, then restore the thread count.
+- **Row-count caching.** `count(*)` runs once per source per engine session
+  instead of once per operation.
+- **Vectorized anonymizers.** The column is dictionary-encoded once with
+  `pd.factorize`, each *unique* value gets one replacement, and the result is
+  assembled by a fancy-index gather — the in-process equivalent of a native
+  join against a mapping table. Cost scales with unique values plus one
+  vectorized pass, never a Python loop over rows: sequential IDs are an
+  `np.arange`, numeric/datetime jitter are single vectorized RNG draws.
+
+### Thousands of columns
+
+- **One scan for all scalar stats.** `DuckDBEngine.stats()` computes count,
+  distinct, min/max/mean/std, and median for *every column in a single
+  aggregate query* — one streaming pass over the data regardless of how many
+  columns there are.
+- **Sketches instead of sorts.** Distinct counts use HyperLogLog
+  (`approx_count_distinct`) and medians use `approx_quantile` — streaming
+  approximations with fixed memory per column, no per-column sort or full
+  hash table. Exact mode (`approximate=False`) exists for small data, and
+  approximate results are flagged on the stats object.
+- **`distributions=False`** skips the per-column histogram/top-k passes
+  entirely, so very wide tables get exactly one scan (this is what the CLI's
+  `--suggest` uses to pick anonymizer types).
+- **Bounded stratification search.** Candidate columns are screened in one
+  aggregate pass (HLL cardinality + average text length), then a greedy
+  fewest-categories-first selection keeps the *joint* stratum count at or
+  below the sample size — so the group count stays bounded no matter how
+  many columns the file has.
+- **Pandas-path trims.** Numeric columns skip the top-values stringification
+  (~1.9× faster stats), report histograms skip near-unique columns instead
+  of hashing millions of ids for a meaningless top-8, and the TUI computes
+  stats in a worker thread so the UI never freezes on load.
+
+### Correctness under scale
+
+Details that only bite on real data, all regression-tested: DuckDB treats NaN
+as a value rather than NULL, so every NaN-sensitive aggregate is filtered
+(`FILTER (WHERE NOT isnan(…))`); missing-value strata survive the allocation
+join via `IS NOT DISTINCT FROM`; HyperLogLog estimates are clamped to each
+column's non-null count; and columns-oriented JSON (the pandas `to_json()`
+default, which SQL engines parse as one giant row) is detected and refused
+with guidance.
+
+Known trade-offs: CSV sources are re-parsed per query (the streaming design —
+convert to Parquet for repeated work), and a seeded stratified run gives up
+multi-threading for reproducibility (unseeded runs use all cores).
+
 ## Supported formats
 
 | Format | Extensions |
