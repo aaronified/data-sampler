@@ -36,6 +36,9 @@ class ColumnStats:
     histogram_labels: list[str] = field(default_factory=list)
     # whether the auto-stratifier would consider this column
     stratifiable: bool = False
+    # True when unique/quantile figures are approximate (HLL / approx_quantile),
+    # as produced by the DuckDB engine over very large inputs
+    approximate: bool = False
 
     def summary(self) -> str:
         """One-line summary suitable for a table cell."""

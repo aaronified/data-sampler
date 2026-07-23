@@ -16,6 +16,7 @@ from data_sampler.engine import (  # noqa: E402
     large_materialization_warning,
     should_use_engine,
     sample as engine_sample,
+    stats as engine_stats,
 )
 
 
@@ -147,6 +148,88 @@ def test_unsupported_extension_raises(engine, tmp_path):
     p.write_bytes(b"not really excel")
     with pytest.raises(ValueError, match="cannot read"):
         engine.row_count(str(p))
+
+
+# ── approximate stats ─────────────────────────────────────────────────────────
+
+def test_stats_kinds_and_shape(engine, big_df):
+    stats = {s.name: s for s in engine.stats(big_df)}
+    assert set(stats) == set(big_df.columns)
+    assert stats["id"].kind == "numeric"
+    assert stats["region"].kind == "categorical"
+    assert stats["score"].kind == "numeric"
+    assert stats["note"].kind == "text"  # long free text
+    # all marked approximate
+    assert all(s.approximate for s in stats.values())
+
+
+def test_stats_counts_and_numeric(engine, big_df):
+    stats = {s.name: s for s in engine.stats(big_df)}
+    assert stats["id"].count == 20_000 and stats["id"].missing == 0
+    score = stats["score"]
+    assert score.min is not None and score.max is not None
+    assert score.min <= score.median <= score.max
+    assert score.mean is not None
+    # numeric histogram has the requested bins
+    assert len(score.histogram) == 10
+    # categorical top-values populated
+    assert stats["region"].top_values
+    assert sum(c for _, c in stats["region"].top_values) <= 20_000
+
+
+def test_stats_approx_distinct_close_to_exact(engine, big_df):
+    approx = {s.name: s for s in engine.stats(big_df)}
+    exact = {s.name: s for s in engine.stats(big_df, approximate=False)}
+    # small-cardinality categorical is exact even under HLL
+    assert exact["region"].unique == big_df["region"].nunique()
+    assert approx["region"].unique == big_df["region"].nunique()
+    # high-cardinality id: HLL trades accuracy for speed — ballpark, not exact
+    # (deterministic for given data; generous bound for HyperLogLog error)
+    assert abs(approx["id"].unique - 20_000) / 20_000 < 0.15
+    assert exact["id"].unique == 20_000  # exact mode is exact
+    assert exact["region"].approximate is False
+
+
+def test_stats_missing_counted(engine):
+    df = pd.DataFrame({"x": [1.0, 2.0, None, 4.0, None], "y": ["a", "a", "b", None, "a"]})
+    stats = {s.name: s for s in engine.stats(df)}
+    assert stats["x"].missing == 2 and stats["x"].count == 3
+    assert stats["y"].missing == 1
+
+
+def test_stats_distributions_false_skips_per_column_passes(engine, big_df):
+    stats = {s.name: s for s in engine.stats(big_df, distributions=False)}
+    # scalar fields still present, but no histograms / top-values computed
+    assert stats["id"].count == 20_000
+    assert stats["region"].histogram == []
+    assert stats["score"].histogram == []
+
+
+def test_module_level_stats_helper(big_df):
+    stats = engine_stats(big_df)
+    assert any(s.name == "region" and s.kind == "categorical" for s in stats)
+
+
+def test_stats_datetime_and_single_value(engine):
+    df = pd.DataFrame(
+        {
+            "when": pd.to_datetime(["2020-01-01", "2020-01-01", "2020-06-15", "2021-12-31"]),
+            "const": ["only", "only", "only", "only"],
+        }
+    )
+    stats = {s.name: s for s in engine.stats(df)}
+    assert stats["when"].kind == "datetime"
+    assert stats["when"].top_values  # datetime gets top-values too
+    assert stats["const"].unique == 1
+    # a constant column has no numeric spread; no crash, top-value present
+    assert stats["const"].top_values[0][0] == "only"
+
+
+def test_stats_empty_frame_no_crash(engine):
+    df = pd.DataFrame({"a": pd.Series([], dtype="float64"), "b": pd.Series([], dtype="object")})
+    stats = {s.name: s for s in engine.stats(df)}
+    assert stats["a"].count == 0 and stats["a"].missing == 0
+    assert stats["a"].histogram == []
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────

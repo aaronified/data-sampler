@@ -80,11 +80,14 @@ its own commit.
   single pass, reader-independent) and two-pass proportional stratified sampling
   (count strata → per-stratum ranked selection) for the stratified case — the
   full dataset is never materialized. Exposed via the engine.
-- [ ] **Block P5 — approximate stats at scale.** HyperLogLog for distinct
-  counts and approximate quantiles/histograms (DuckDB `approx_count_distinct`,
-  `approx_quantile`, histogram aggregation) so per-column stats over billions of
-  rows stay cheap. Fall back to exact stats for small inputs. (`approx_count_distinct`
-  already powers the engine's stratification-column selection.)
+- [x] **Block P5 — approximate stats at scale.** `DuckDBEngine.stats()` returns
+  per-column `ColumnStats` computed in DuckDB: distinct counts via HyperLogLog
+  (`approx_count_distinct`), median via `approx_quantile`, plus min/max/mean/std,
+  missing counts, numeric histograms (equal-width bins) and categorical/datetime
+  top-values. All scalar aggregates run in one streaming pass; `approximate=False`
+  gives exact counts/quantiles for small inputs, and `distributions=False` skips
+  the per-column passes for a single cheap scalar pass over very wide inputs.
+  `approx_count_distinct` also powers the engine's stratification-column selection.
 
 ## Later
 

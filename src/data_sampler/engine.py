@@ -35,6 +35,7 @@ import pandas as pd
 
 from ._logging import get_logger
 from .sampling import SampleResult
+from .stats import ColumnStats, _fmt_num
 
 log = get_logger(__name__)
 
@@ -68,6 +69,35 @@ def _quote_ident(name: str) -> str:
 
 def _quote_str(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _to_float(v) -> float | None:
+    """Coerce a DuckDB scalar to a finite float, or None (NULL/NaN/inf)."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _duckdb_kind(dtype: str) -> str:
+    """Map a DuckDB column type name to a :class:`ColumnStats` kind."""
+    d = dtype.lower()
+    if d.startswith("bool"):
+        return "boolean"
+    if d.startswith(("date", "timestamp", "time", "interval")):
+        return "datetime"
+    if d.startswith((
+        "tinyint", "smallint", "integer", "int", "bigint", "hugeint",
+        "utinyint", "usmallint", "uinteger", "ubigint", "uhugeint",
+        "decimal", "double", "float", "real", "numeric",
+    )):
+        return "numeric"
+    if d.startswith(("varchar", "char", "text", "string", "uuid", "bit", "blob")):
+        return "categorical"  # refined to "text" by average length
+    return "other"
 
 
 def _proportional_allocation(sizes: np.ndarray, count: int) -> np.ndarray:
@@ -223,6 +253,129 @@ class DuckDBEngine:
             selected.append(name)
         log.debug("engine stratification columns: %s", selected)
         return selected
+
+    # ── approximate stats ─────────────────────────────────────────────────────
+
+    def stats(
+        self,
+        source,
+        columns: Iterable[str] | None = None,
+        approximate: bool = True,
+        histogram_bins: int = 10,
+        top: int = 8,
+        distributions: bool = True,
+    ) -> list[ColumnStats]:
+        """Per-column :class:`ColumnStats`, computed in DuckDB.
+
+        With ``approximate`` (default) distinct counts use HyperLogLog
+        (``approx_count_distinct``) and the median uses ``approx_quantile`` — both
+        streaming, so column stats stay cheap over billions of rows. Set
+        ``approximate=False`` for exact counts/quantiles on small inputs.
+
+        ``distributions`` controls whether per-column histograms / top-values are
+        computed (one extra streaming pass per column). Turn it off for a single
+        cheap scalar pass across very wide (thousands-of-columns) inputs.
+        """
+        con = self.con
+        src = self._source_sql(source)
+        total = int(con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+        info = con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()
+        col_types = {r[0]: str(r[1]) for r in info}
+        cols = list(col_types) if columns is None else [c for c in columns if c in col_types]
+        if not cols:
+            return []
+
+        # Pass A: all scalar aggregates for every column in ONE query
+        parts: list[str] = []
+        for i, c in enumerate(cols):
+            q = _quote_ident(c)
+            a = f"c{i}"
+            kind = _duckdb_kind(col_types[c])
+            parts.append(f"count({q}) AS {a}_cnt")
+            parts.append(
+                (f"approx_count_distinct({q})" if approximate else f"count(DISTINCT {q})")
+                + f" AS {a}_nd"
+            )
+            if kind == "numeric":
+                parts += [
+                    f"min({q})::DOUBLE AS {a}_min",
+                    f"max({q})::DOUBLE AS {a}_max",
+                    f"avg({q}::DOUBLE) AS {a}_avg",
+                    f"stddev_samp({q}::DOUBLE) AS {a}_std",
+                    (f"approx_quantile({q}::DOUBLE, 0.5)" if approximate
+                     else f"quantile_cont({q}::DOUBLE, 0.5)") + f" AS {a}_med",
+                ]
+            elif kind == "categorical":
+                parts.append(f"avg(length(CAST({q} AS VARCHAR))) AS {a}_len")
+        row = con.execute(f"SELECT {', '.join(parts)} FROM {src}").fetchdf().iloc[0]
+
+        out: list[ColumnStats] = []
+        for i, c in enumerate(cols):
+            a = f"c{i}"
+            kind = _duckdb_kind(col_types[c])
+            count = int(row[f"{a}_cnt"] or 0)
+            missing = total - count
+            unique = int(row[f"{a}_nd"] or 0)
+            if kind == "categorical" and (row.get(f"{a}_len") or 0) > 50:
+                kind = "text"
+
+            cs = ColumnStats(
+                name=str(c), dtype=col_types[c], kind=kind, count=count,
+                missing=missing, missing_pct=missing / total * 100 if total else 0.0,
+                unique=unique, unique_pct=unique / count * 100 if count else 0.0,
+                approximate=approximate,
+            )
+            # stratifiable flag, mirroring stats.is_stratifiable's rules
+            strat = 2 <= unique <= min(100, total * 0.5)
+            if kind == "numeric" and unique > min(20, total * 0.3):
+                strat = False
+            if kind == "text":
+                strat = False
+            cs.stratifiable = strat
+
+            if kind == "numeric" and count > 0:
+                cs.min = _to_float(row.get(f"{a}_min"))
+                cs.max = _to_float(row.get(f"{a}_max"))
+                cs.mean = _to_float(row.get(f"{a}_avg"))
+                cs.std = _to_float(row.get(f"{a}_std")) or 0.0
+                cs.median = _to_float(row.get(f"{a}_med"))
+
+            if distributions and count > 0:
+                self._fill_distribution(cs, src, c, kind, histogram_bins, top)
+            out.append(cs)
+        return out
+
+    def _fill_distribution(self, cs, src, col, kind, bins, top) -> None:
+        con = self.con
+        q = _quote_ident(col)
+        if kind == "numeric" and cs.min is not None and cs.max is not None and cs.min < cs.max:
+            lo, hi = float(cs.min), float(cs.max)
+            width = hi - lo
+            # equal-width bins via floor (width_bucket isn't available in DuckDB);
+            # clamp to [0, bins-1] so the max value lands in the last bin. The
+            # `x = x` predicate drops NaN (inf can't occur: cs.min/max are finite)
+            rows = con.execute(
+                f"SELECT least({bins - 1}, greatest(0, CAST(floor("
+                f"({q}::DOUBLE - {lo!r}) / {width!r} * {bins}) AS INTEGER))) AS b, "
+                f"count(*) AS n FROM {src} "
+                f"WHERE {q} IS NOT NULL AND {q}::DOUBLE = {q}::DOUBLE GROUP BY b"
+            ).fetchall()
+            counts = [0] * bins
+            for b, n in rows:
+                counts[int(b)] += int(n)
+            cs.histogram = counts
+            edges = [lo + (hi - lo) * k / bins for k in range(bins + 1)]
+            cs.histogram_labels = [
+                f"{_fmt_num(edges[k])} – {_fmt_num(edges[k + 1])}" for k in range(bins)
+            ]
+        elif kind in ("categorical", "boolean", "text", "datetime", "other"):
+            rows = con.execute(
+                f"SELECT CAST({q} AS VARCHAR) AS v, count(*) AS n FROM {src} "
+                f"WHERE {q} IS NOT NULL GROUP BY v ORDER BY n DESC, v LIMIT {top}"
+            ).fetchall()
+            cs.top_values = [(str(v), int(n)) for v, n in rows]
+            cs.histogram = [int(n) for _, n in rows]
+            cs.histogram_labels = [str(v) for v, _ in rows]
 
     # ── sampling ──────────────────────────────────────────────────────────────
 
@@ -393,3 +546,15 @@ def sample(
             source, count, use_random=use_random,
             exclude_columns=exclude_columns, strat_cols=strat_cols, seed=seed,
         )
+
+
+def stats(
+    source,
+    columns: Iterable[str] | None = None,
+    approximate: bool = True,
+    threads: int | None = None,
+    memory_limit: str | None = None,
+) -> list[ColumnStats]:
+    """Convenience: open a :class:`DuckDBEngine`, compute stats, close it."""
+    with DuckDBEngine(threads=threads, memory_limit=memory_limit) as engine:
+        return engine.stats(source, columns=columns, approximate=approximate)

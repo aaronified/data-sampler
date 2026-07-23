@@ -36,6 +36,16 @@
   the default for small/medium data. Adversarially verified across 4 review
   lenses with zero findings; a 2M-row Parquet file sampled to 1000 rows in
   ~1s, out-of-core.
+- **Added approximate stats at scale** (`DuckDBEngine.stats()` and
+  module-level `engine.stats()`, Block P5 of the v3.2 performance & scale
+  effort): per-column `ColumnStats` computed in DuckDB — distinct counts via
+  HyperLogLog (`approx_count_distinct`), median via `approx_quantile`, plus
+  min/max/mean/std, missing counts, equal-width numeric histograms, and
+  categorical/datetime top-values. Scalar aggregates run in one streaming
+  pass so stats stay cheap over billions of rows; `approximate=False` gives
+  exact counts/quantiles for small inputs, and `distributions=False` skips
+  the per-column passes for a single cheap scalar pass across very wide
+  inputs. A new `ColumnStats.approximate` flag marks approximate results.
 
 ## v3.1 — unreleased
 
