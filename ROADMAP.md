@@ -45,6 +45,47 @@ gets its own commit after tests pass and docs are updated.
   in a new right-hand panel on the TUI report screen and in a "COLUMN
   DISTRIBUTIONS" section of the CLI output.
 
+## v3.2 — performance & scale
+
+Goal: handle very large inputs (toward billions of rows × thousands of columns)
+as fast as possible without a C rewrite. The wins are algorithmic and
+architectural (vectorization, out-of-core columnar engine, streaming sampling,
+approximate stats), not language-level. Each block is independent and ships on
+its own commit.
+
+- [ ] **Block P1 — vectorize the anonymizers.** Replace the per-unique Python
+  loop + `Series.map(dict)` with a single `pd.factorize` (dictionary-encode)
+  and a vectorized gather (the in-process equivalent of a native join against a
+  mapping table). Sequential IDs become `np.arange`; numeric/datetime jitter
+  become vectorized numpy draws. Preserves the consistent-mapping guarantee,
+  seed reproducibility, NaN/dtype handling, and the public `build_mapping`
+  API. Pure win, no new dependencies.
+- [ ] **Block P2 — DuckDB out-of-core engine.** An optional engine that pushes
+  loading, stratification, and sampling into DuckDB (vectorized, multi-threaded,
+  larger-than-memory). Set `PRAGMA threads` for parallelism and a memory limit
+  so it spills to disk instead of OOM-ing. Selected automatically for large
+  inputs (or via a flag), with the pandas path kept as the default for small/
+  medium data. CSV/Excel/JSON still supported (DuckDB reads CSV/Parquet
+  natively; Excel is converted).
+- [ ] **Block P3 — Parquet fast path (separate).** A dedicated Parquet code
+  path with column pruning and predicate/projection pushdown so only the needed
+  columns/rows are read — the biggest I/O win, independent of the compute
+  language. CSV/Excel keep working via the compatibility path. Surface a warning
+  about the memory speedbump when a Parquet dataset is too large to materialize,
+  steering the user to the streaming/DuckDB path.
+- [ ] **Block P4 — streaming sampling algorithms.** Reservoir and Bernoulli
+  sampling so the full dataset is never materialized. Stratified: two-pass
+  (count strata → reservoir-sample per stratum) or single-pass weighted
+  reservoir. This is the algorithmic key to billion-row inputs; exposed through
+  the engine so both the CLI and TUI benefit.
+- [ ] **Block P5 — approximate stats at scale.** HyperLogLog for distinct
+  counts and approximate quantiles/histograms (DuckDB `approx_count_distinct`,
+  `approx_quantile`, histogram aggregation) so per-column stats over billions of
+  rows stay cheap. Fall back to exact stats for small inputs.
+
 ## Later
 
 - Optional PyInstaller EXE build of the TUI (replaces the old Tkinter EXE).
+- Rust/Polars-on-Arrow native engine (pyo3) as an alternative to DuckDB.
+- GPU acceleration (RAPIDS cuDF) for the aggregation-heavy paths.
+- Distributed backend (Dask / Ray Data / Spark) for multi-machine scale.

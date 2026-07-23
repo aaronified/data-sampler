@@ -1,9 +1,21 @@
 """Optional per-column anonymizers.
 
 Every anonymizer maps each *unique* original value to exactly one replacement
-(consistent mapping), so repeated values stay repeated and the joint
-distribution of the column — the statistical variety this project exists to
-preserve — survives anonymization. Missing values (NaN) are left untouched.
+(consistent mapping), so repeated values stay repeated — the statistical
+variety this project exists to preserve survives anonymization. Missing values
+(NaN/NaT) are left untouched.
+
+Two families differ in how completely the distribution survives:
+
+- **Relabelling** anonymizers (``names``, ``sequential_id``, ``random_string``,
+  ``hex``) are *bijective*: distinct originals map to distinct replacements, so
+  the exact value-count distribution is preserved (only the labels change).
+- **Jitter** anonymizers (``numeric_jitter``, ``datetime_jitter``) add bounded
+  random noise: each replacement stays within ±the configured bound of its
+  original, so the range and rough shape survive, but two *nearby* distinct
+  values can round/shift onto the same replacement (jitter is noise, not a
+  bijection). Widen the bound, add ``round_to``/finer ``unit`` resolution, or
+  use a relabelling anonymizer if you need strict distinct-to-distinct output.
 
 Available kinds (see :data:`KINDS` for aliases):
 
@@ -26,6 +38,7 @@ import string
 from abc import ABC, abstractmethod
 from typing import Any, Hashable, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 from . import _names
@@ -36,29 +49,92 @@ log = get_logger(__name__)
 AnonymizerSpec = "ColumnAnonymizer | str | tuple[str, dict] | dict"
 
 
+def _np_rng(rng: random.Random) -> np.random.Generator:
+    """Derive a numpy Generator from a :class:`random.Random`.
+
+    Draws 64 bits from ``rng`` so vectorized anonymizers stay deterministic
+    for a given seed and column order (``anonymize`` passes one ``Random`` to
+    every column in turn), without coupling to numpy's global state.
+    """
+    return np.random.default_rng(rng.getrandbits(64))
+
+
 class ColumnAnonymizer(ABC):
-    """Base class: builds a unique-value → replacement mapping per column."""
+    """Base class: replace each unique original value with one replacement.
+
+    The pipeline is vectorized. The column is dictionary-encoded once with
+    :func:`pandas.factorize` — yielding integer ``codes`` per row plus the
+    distinct ``uniques`` in order of first appearance — each subclass produces
+    one replacement per unique value via :meth:`build_replacements`, and the
+    result is assembled by fancy-indexing (gathering) ``replacements`` with
+    ``codes``. That is the in-process equivalent of a native join against a
+    mapping table: no Python loop over rows and no second hash pass, so cost
+    scales with the number of *unique* values plus a vectorized gather over the
+    rows. The consistent-mapping guarantee (equal values → equal replacements)
+    is inherent to the encoding, and missing values (``NaN``/``NaT``) are
+    preserved.
+    """
 
     def transform(self, series: pd.Series, rng: random.Random | None = None) -> pd.Series:
         """Return a copy of ``series`` with all non-null values replaced."""
         rng = rng if rng is not None else random.Random()
-        uniques = pd.unique(series.dropna())
-        mapping = self.build_mapping(list(uniques), rng)
+        codes, uniques = pd.factorize(series, use_na_sentinel=True)
+        if len(uniques) == 0:  # all-null (or empty) column: nothing to map
+            return series.copy()
+        replacements = self.build_replacements(uniques, rng)
         log.debug(
-            "%s: column %r — %d unique values mapped",
-            type(self).__name__, series.name, len(mapping),
+            "%s: column %r — %d unique values mapped over %d rows",
+            type(self).__name__, series.name, len(uniques), len(series),
         )
-        result = series.map(mapping)
+        result = self._gather(series, codes, replacements)
         return self._restore_dtype(series, result)
 
-    def _restore_dtype(self, original: pd.Series, result: pd.Series) -> pd.Series:
+    @staticmethod
+    def _gather(
+        series: pd.Series, codes: np.ndarray, replacements: Sequence[Any]
+    ) -> pd.Series:
+        """Gather ``replacements`` by ``codes``, restoring NaN where code == -1."""
+        repl = np.asarray(replacements)
+        # a code of -1 marks a missing value; clip it to 0 for the fancy-index
+        # (so we never read out of bounds) then mask those positions back to NaN
+        safe = np.where(codes >= 0, codes, 0)
+        gathered = repl[safe]
+        result = pd.Series(gathered, index=series.index, name=series.name)
+        if (codes < 0).any():
+            result = result.where(pd.Series(codes >= 0, index=series.index))
         return result
 
-    @abstractmethod
     def build_mapping(
         self, uniques: Sequence[Hashable], rng: random.Random
     ) -> dict[Hashable, Any]:
-        """Map each unique original value to its replacement."""
+        """Map each unique original value to its replacement (a dict).
+
+        Kept for direct callers; :meth:`transform` uses the vectorized
+        :meth:`build_replacements` path instead.
+        """
+        uniques = list(uniques)
+        return dict(zip(uniques, self.build_replacements(uniques, rng)))
+
+    def _restore_dtype(self, original: pd.Series, result: pd.Series) -> pd.Series:
+        # round-trip a pandas nullable string dtype (else its pd.NA marker
+        # degrades to a float nan); plain object columns are left as-is
+        dt = original.dtype
+        if pd.api.types.is_string_dtype(dt) and not pd.api.types.is_object_dtype(dt):
+            try:
+                return result.astype(dt)
+            except (TypeError, ValueError):
+                return result
+        return result
+
+    @abstractmethod
+    def build_replacements(
+        self, uniques: Sequence[Hashable], rng: random.Random
+    ) -> Sequence[Any]:
+        """Return one replacement per unique value, in the order given.
+
+        ``uniques`` are the column's distinct non-null values in order of first
+        appearance (the ``uniques`` array from :func:`pandas.factorize`).
+        """
 
 
 def _fresh(seen: set, generate, rng: random.Random, tries: int = 100) -> str:
@@ -119,22 +195,23 @@ class NameAnonymizer(ColumnAnonymizer):
             "last_first": f"{last}, {first}",
         }[style]
 
-    def build_mapping(self, uniques, rng):
+    def build_replacements(self, uniques, rng):
+        n = len(uniques)
         style = self.style
         # keep the collision rate low: escalate once past half capacity
-        if len(uniques) > self._capacity(style) // 2:
+        if n > self._capacity(style) // 2:
             style = "first_middle_last"
             log.debug(
                 "NameAnonymizer: %d values exceed half capacity of %r; "
-                "using first_middle_last", len(uniques), self.style,
+                "using first_middle_last", n, self.style,
             )
         seen: set[str] = set()
-        mapping: dict[Hashable, Any] = {}
-        for value in uniques:
+        out: list[str] = []
+        for _ in range(n):
             name = _fresh(seen, lambda r: self._generate(style, r), rng)
             seen.add(name)
-            mapping[value] = name
-        return mapping
+            out.append(name)
+        return out
 
 
 class SequentialIdAnonymizer(ColumnAnonymizer):
@@ -153,16 +230,17 @@ class SequentialIdAnonymizer(ColumnAnonymizer):
         self.prefix = str(prefix)
         self.width = int(width)
 
-    def build_mapping(self, uniques, rng):
-        mapping = {}
-        current = self.start
-        for value in uniques:
-            if self.prefix or self.width:
-                mapping[value] = f"{self.prefix}{current:0{self.width}d}"
-            else:
-                mapping[value] = current
-            current += self.interval
-        return mapping
+    def build_replacements(self, uniques, rng):
+        n = len(uniques)
+        # vectorized: start, start+interval, … in order of first appearance
+        values = self.start + np.arange(n, dtype=np.int64) * self.interval
+        if self.prefix or self.width:
+            # string formatting is per-unique (∝ uniques, not rows)
+            return np.array(
+                [f"{self.prefix}{int(v):0{self.width}d}" for v in values],
+                dtype=object,
+            )
+        return values
 
     def _restore_dtype(self, original, result):
         if not self.prefix and not self.width:
@@ -175,9 +253,16 @@ class SequentialIdAnonymizer(ColumnAnonymizer):
 class NumericJitterAnonymizer(ColumnAnonymizer):
     """Replace numbers with a random value within ±``pct`` of the original.
 
-    Defaults to ±20 %. Integer columns stay integers; ``round_to`` rounds
-    floats to that many decimal places. Note: a value of exactly 0 has no
-    magnitude to jitter and is returned unchanged.
+    Defaults to ±20 %. Integer columns stay integers (the in-bound draw is
+    rounded to the nearest int, which for small magnitudes can nudge the result
+    a fraction beyond ±``pct``); ``round_to`` rounds floats to that many decimal
+    places. Note: a value of exactly 0 has no magnitude to jitter and is
+    returned unchanged.
+
+    This is additive noise, not a bijection: distinct originals that sit closer
+    together than the jitter can move them (e.g. adjacent integers under a small
+    ``pct``) may land on the same replacement. The consistent mapping and the
+    ±``pct`` bound always hold; strict distinct-to-distinct output does not.
     """
 
     def __init__(self, pct: float = 0.20, round_to: int | None = None):
@@ -194,18 +279,16 @@ class NumericJitterAnonymizer(ColumnAnonymizer):
             )
         return super().transform(series, rng)
 
-    def build_mapping(self, uniques, rng):
-        integer = all(float(v) == int(v) for v in uniques) if uniques else False
-        mapping = {}
-        for value in uniques:
-            jittered = float(value) * rng.uniform(1 - self.pct, 1 + self.pct)
-            if integer:
-                mapping[value] = int(round(jittered))
-            elif self.round_to is not None:
-                mapping[value] = round(jittered, self.round_to)
-            else:
-                mapping[value] = jittered
-        return mapping
+    def build_replacements(self, uniques, rng):
+        vals = np.asarray(uniques, dtype=float)
+        integer = bool(np.all(np.mod(vals, 1) == 0)) if len(vals) else False
+        factors = _np_rng(rng).uniform(1 - self.pct, 1 + self.pct, size=len(vals))
+        jittered = vals * factors
+        if integer:
+            return np.rint(jittered).astype(np.int64)
+        if self.round_to is not None:
+            return np.round(jittered, self.round_to)
+        return jittered
 
 
 class DatetimeJitterAnonymizer(ColumnAnonymizer):
@@ -222,6 +305,11 @@ class DatetimeJitterAnonymizer(ColumnAnonymizer):
     Non-datetime columns are coerced with :func:`pandas.to_datetime` first (so
     date strings loaded from CSV work); a column that cannot be parsed as
     dates raises :class:`TypeError`. Timezone-aware inputs keep their zone.
+
+    Like :class:`NumericJitterAnonymizer` this is bounded noise, not a
+    bijection: distinct timestamps closer together than the jitter window (and
+    at the chosen ``unit`` resolution) can shift onto the same replacement. Use
+    a wider ``max_delta`` or finer ``unit`` if that matters.
     """
 
     def __init__(self, max_delta: str | int | float = "7D", unit: str = "s"):
@@ -248,15 +336,16 @@ class DatetimeJitterAnonymizer(ColumnAnonymizer):
                 ) from exc
         return super().transform(series, rng)
 
-    def build_mapping(self, uniques, rng):
-        mapping = {}
-        for value in uniques:
-            offset = rng.randint(-self._span, self._span)
-            mapping[value] = pd.Timestamp(value) + pd.Timedelta(offset, self.unit)
-        return mapping
+    def build_replacements(self, uniques, rng):
+        # vectorized: one uniform integer offset per unique, in whole units
+        offsets = _np_rng(rng).integers(
+            -self._span, self._span + 1, size=len(uniques)
+        )
+        base = pd.DatetimeIndex(uniques)
+        return base + pd.to_timedelta(offsets, unit=self.unit)
 
     def _restore_dtype(self, original, result):
-        # map() over Timestamp values yields object dtype; normalize back to
+        # the gather yields object/datetime64 values; normalize back to
         # datetime64 (preserving tz-awareness of the coerced input)
         return pd.to_datetime(result)
 
@@ -290,14 +379,14 @@ class RandomStringAnonymizer(ColumnAnonymizer):
         chars = self.CHARSETS[self.charset]
         return self.prefix + "".join(rng.choice(chars) for _ in range(self.length))
 
-    def build_mapping(self, uniques, rng):
+    def build_replacements(self, uniques, rng):
         seen: set[str] = set()
-        mapping: dict[Hashable, Any] = {}
-        for value in uniques:
+        out: list[str] = []
+        for _ in range(len(uniques)):
             s = _fresh(seen, self._generate, rng)
             seen.add(s)
-            mapping[value] = s
-        return mapping
+            out.append(s)
+        return out
 
 
 KINDS: dict[str, type[ColumnAnonymizer]] = {

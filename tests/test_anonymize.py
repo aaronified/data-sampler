@@ -293,6 +293,45 @@ def test_short_digit_strings_stay_unique_via_suffix_fallback():
     assert out.nunique() == 15
 
 
+# ── mapping semantics: bijective relabelling vs bounded-noise jitter ─────────
+
+def test_relabelling_anonymizers_are_bijective_on_dense_values():
+    # sequential_id / names / random_string / hex must keep distinct→distinct
+    ints = pd.Series(range(1, 40), name="x")  # adjacent integers
+    assert (
+        make_anonymizer("sequential_id").transform(ints, random.Random(0)).nunique()
+        == ints.nunique()
+    )
+    strs = pd.Series([f"v{i}" for i in range(39)], name="x")
+    for kind in ("names", "random_string", "hex"):
+        out = make_anonymizer(kind).transform(strs, random.Random(0))
+        assert out.nunique() == strs.nunique()
+
+
+def test_numeric_jitter_keeps_bound_and_consistency_but_may_collide():
+    # jitter is bounded noise, not a bijection: adjacent ints can collide, but
+    # the ±pct bound and the consistent (equal→equal) mapping always hold
+    s = pd.Series([1, 2, 2, 3, 4, 5, 1], name="x")
+    out = NumericJitterAnonymizer(pct=0.2).transform(s, random.Random(0))
+    assert out.iloc[0] == out.iloc[6]  # both were 1 → same replacement
+    assert out.iloc[1] == out.iloc[2]  # both were 2 → same replacement
+    # integer columns round to the nearest int, so the ±pct bound may be
+    # exceeded by up to the 0.5 rounding step (the pre-rounding draw is in bound)
+    for orig, new in zip(s, out):
+        assert abs(new - orig) <= abs(orig) * 0.2 + 0.5 + 1e-9
+    assert out.nunique() <= s.nunique()  # collisions are allowed by design
+
+
+def test_string_dtype_round_trips_for_relabelling():
+    # nullable StringDtype and its pd.NA marker survive (not degraded to nan)
+    s = pd.Series(["a", "b", "a", None], dtype="string", name="x")
+    for kind in ("names", "random_string", "hex"):
+        out = make_anonymizer(kind).transform(s, random.Random(0))
+        assert isinstance(out.dtype, pd.StringDtype)
+        assert out.isna().iloc[3]
+        assert out.iloc[0] == out.iloc[2]
+
+
 # ── spec coercion ────────────────────────────────────────────────────────────
 
 def test_spec_forms_equivalent(people_df):

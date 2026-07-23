@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.2 — unreleased
+
+- **Vectorized every anonymizer** (Block P1 of the v3.2 performance & scale
+  effort): the transform pipeline now does a single `pd.factorize`
+  (dictionary-encode) plus a vectorized gather instead of `pd.unique` + a
+  per-unique Python dict + `Series.map` (the in-process equivalent of a native
+  join against a mapping table). Sequential IDs use `np.arange`;
+  numeric/datetime jitter use vectorized numpy draws. Benchmarks: ~4–6× faster
+  on `sequential_id` and up to ~3.3× on `numeric_jitter`, with `sequential_id`
+  output verified bit-identical to the old path. The public `build_mapping`
+  API, consistent-mapping guarantee, seed reproducibility, and NaN/dtype
+  handling are preserved; nullable string dtypes now round-trip. Docstrings
+  clarified that relabelling anonymizers (`names`, `sequential_id`,
+  `random_string`, `hex`) are bijective while jitter anonymizers
+  (`numeric_jitter`, `datetime_jitter`) are bounded noise (distinct nearby
+  values may collide).
+
 ## v3.1 — unreleased
 
 - **Added a `datetime_jitter` anonymizer** (`DatetimeJitterAnonymizer`):

@@ -120,6 +120,41 @@ Add an entry for every defect found by tests or manual runs.
   summary`` (and the matching ``_row_cells`` order) so the actionable columns
   stay visible; ``distribution``/``summary`` trail them.
 
+## Jitter anonymizers are bounded noise, not bijections (found by P1 review)
+
+- **Symptom:** the adversarial verification of the vectorized-anonymizer rewrite
+  flagged that `numeric_jitter`/`datetime_jitter` can map *distinct* nearby
+  values to the same replacement (e.g. adjacent integers under ±20 %, or dates
+  closer together than the jitter window), which breaks the exact value-count
+  distribution the module docstring implied every anonymizer preserves.
+- **Cause:** this is inherent to jitter and was present in the pre-vectorization
+  code too — each unique value gets an independent bounded random offset with no
+  collision avoidance. Forcing distinct→distinct would be *wrong*: for dense
+  data it is impossible within the ±bound, so it would violate the ±bound that
+  is jitter's actual contract (and that `test_jitter_within_20_pct` enforces).
+- **Fix:** documentation, not behavior. The module and class docstrings now
+  distinguish *relabelling* anonymizers (`names`, `sequential_id`,
+  `random_string`, `hex` — bijective, exact distribution preserved) from
+  *jitter* anonymizers (bounded noise; range/shape preserved, but distinct
+  values may collide). Tests `test_relabelling_anonymizers_are_bijective...` and
+  `test_numeric_jitter_keeps_bound_and_consistency_but_may_collide` lock this in.
+- **Related subtlety:** for **integer** columns `numeric_jitter` rounds the
+  in-bound draw to the nearest int, so the result can exceed ±`pct` by up to the
+  0.5 rounding step for small magnitudes. Expected; the pre-rounding draw is in
+  bound.
+
+## Vectorized anonymizers dropped the nullable string dtype (found by P1 review)
+
+- **Symptom:** anonymizing a pandas nullable `StringDtype` column with `names`/
+  `random_string` returned a plain `str`/object column and turned `pd.NA` into a
+  float `nan` (no data loss — the missing positions were preserved — but the
+  dtype and NA marker were not round-tripped).
+- **Cause:** the new gather builds an object array; the base `_restore_dtype`
+  was a no-op for strings.
+- **Fix:** `ColumnAnonymizer._restore_dtype` now casts the result back to the
+  original dtype when it is a non-object string dtype (`is_string_dtype and not
+  is_object_dtype`), wrapped in try/except so it never breaks a valid result.
+
 ## Template
 
 - **Symptom:** what was observed.
