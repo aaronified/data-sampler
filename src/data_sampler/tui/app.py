@@ -527,8 +527,24 @@ class ColumnsScreen(Screen):
         self._show_detail(self.selected)
         self._sync_config_panel(self.selected)
 
+    @staticmethod
+    def _is_stale(event_value, widget_value) -> bool:
+        """Whether a Changed message no longer reflects its widget's value.
+
+        Every widget runs its own message pump, so a Changed can be delivered
+        AFTER the value it reports was superseded (mount-time echoes, rapid
+        edits, panel syncs). Applying it would roll the config back — the
+        exact class of race that reset user edits on slow CI machines. A
+        message whose value differs from the widget's current value is
+        provably stale and safe to drop: the message carrying the current
+        value is either this one or still on its way.
+        """
+        return str(event_value) != str(widget_value)
+
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing or self.selected is None:
+            return
+        if self._is_stale(event.value, event.select.value):
             return
         cfg = self.configs[self.selected]
         if event.select.id == "anon-kind":
@@ -545,11 +561,15 @@ class ColumnsScreen(Screen):
         if event.switch.id == "skip-strat":
             if self._syncing or self.selected is None:
                 return
+            if self._is_stale(event.value, event.switch.value):
+                return
             self.configs[self.selected].skip_strat = event.value
             self._refresh_row(self.selected)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing or self.selected is None:
+            return
+        if self._is_stale(event.value, event.input.value):
             return
         mapping = self._OPT_IDS.get(event.input.id or "")
         if mapping is None:

@@ -249,6 +249,26 @@ all were fixed except one accepted divergence. Highlights worth remembering:
 - **Lesson:** any "stable row id" assumption must be validated against
   multi-file sources — the single-file case hides the fan-out completely.
 
+## CI-only TUI failure #2: stale Changed messages (v3.3.0 release run)
+
+- **Symptom:** the v3.3.0 publish was blocked by the same Windows-CI test one
+  assertion further along: the Select edit survived (v3.2.1's fix held) but
+  the follow-up Input edit vanished (`KeyError: 'start'`).
+- **Cause:** third mechanism in the same family. Every Textual widget runs
+  its own message pump, so a stale `Select.Changed("none")` (mount-time echo
+  or superseded edit) can be *delivered* after the user's edits were applied.
+  The handler rolled `cfg.kind` back to `none` — wiping `options` — before
+  the Input edit's assertion.
+- **Fix:** a general staleness guard (`_is_stale`) on every Changed handler
+  (Select/Input/Switch): a message whose value no longer matches its widget's
+  *current* value is provably stale and dropped — the message carrying the
+  current value is either this one or still in flight. Subsumes the earlier
+  duplicate-highlight class too. Regression test delivers stale messages
+  directly (`test_stale_changed_messages_do_not_clobber_config`).
+- **Lesson (general):** in Textual, never apply a Changed message's payload
+  without checking it still matches the widget — cross-widget delivery order
+  is unspecified, and only loaded machines (CI) expose it.
+
 ## Template
 
 - **Symptom:** what was observed.

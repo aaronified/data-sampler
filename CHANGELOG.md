@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.3.1 — 2026-07-23
+
+- **Fixed the second CI-only TUI race** (caught, again, by the release CI —
+  it blocked v3.3.0's PyPI publish): a stale `Changed` message (mount-time
+  echo or superseded edit, delivered late because every Textual widget runs
+  its own message pump) could roll an anonymizer choice back to `none` and
+  wipe its options. All Select/Input/Switch handlers now drop any `Changed`
+  whose value no longer matches the widget's current value — provably stale
+  — which also subsumes the v3.2.1 duplicate-highlight fix. v3.3.0 was never
+  published to PyPI; this release carries all of its changes.
+
 ## v3.3.0 — 2026-07-23
 
 - **Two-phase narrow sampling in the DuckDB engine.** The expensive phase of a

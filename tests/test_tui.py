@@ -147,6 +147,39 @@ def test_duplicate_row_highlight_does_not_clobber_pending_edit(csv_file):
     run(go())
 
 
+def test_stale_changed_messages_do_not_clobber_config(csv_file):
+    """Regression: the CI-only race that blocked the v3.3.0 release.
+
+    Widgets have independent message pumps, so a stale Select.Changed("none")
+    (mount-time echo or superseded edit) can be delivered AFTER the user set
+    "sequential_id" and AFTER their option edits. Applying it resets the kind
+    and wipes the options (KeyError: 'start' on CI). A Changed whose value no
+    longer matches the widget's current value must be dropped as stale.
+    """
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(140, 45)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            assert screen.selected == "id"
+            sel = screen.query_one("#anon-kind", Select)
+            sel.value = "sequential_id"
+            await pilot.pause()
+            start_input = screen.query_one("#opt-seq-start", Input)
+            start_input.value = "5000"
+            await pilot.pause()
+            assert screen.configs["id"].options["start"] == "5000"
+            # deliver a stale Changed("none"): widget shows "sequential_id",
+            # so the handler must drop it instead of resetting the config
+            screen.on_select_changed(Select.Changed(sel, "none"))
+            assert screen.configs["id"].kind == "sequential_id"
+            assert screen.configs["id"].options["start"] == "5000"
+            # stale Input.Changed likewise (widget holds "5000", message "1")
+            screen.on_input_changed(Input.Changed(start_input, "1"))
+            assert screen.configs["id"].options["start"] == "5000"
+
+    run(go())
+
+
 def test_invalid_count_notifies_instead_of_running(csv_file):
     async def go():
         app = DataSamplerApp(path=str(csv_file))
