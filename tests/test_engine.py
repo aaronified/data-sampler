@@ -339,6 +339,134 @@ def test_row_count_cached_per_file(tmp_path, big_df):
         assert len(result.data) == 50
 
 
+# ── two-phase narrow sampling (rank narrow, fetch winners) ───────────────────
+
+def test_narrow_parquet_stratified_schema_count_distribution(tmp_path, engine, big_df):
+    p = tmp_path / "narrow.parquet"
+    big_df.to_parquet(p, index=False)
+    result = engine.sample(str(p), 500, strat_cols=["region"], seed=2)
+    assert len(result.data) == 500
+    # full schema, original order, no file_row_number/_ds_rowid leak
+    assert list(result.data.columns) == list(big_df.columns)
+    src_p = big_df["region"].value_counts(normalize=True)
+    smp_p = result.data["region"].value_counts(normalize=True)
+    for cat in src_p.index:
+        assert abs(src_p[cat] - smp_p.get(cat, 0)) < 0.05
+
+
+def test_narrow_parquet_seeded_reproducible_across_engines(tmp_path, big_df):
+    p = tmp_path / "repro.parquet"
+    big_df.to_parquet(p, index=False)
+    with DuckDBEngine(threads=4) as e1:
+        s1 = e1.sample(str(p), 300, strat_cols=["region", "tier"], seed=9)
+        r1 = e1.sample(str(p), 300, use_random=True, seed=9)
+    with DuckDBEngine(threads=4) as e2:
+        s2 = e2.sample(str(p), 300, strat_cols=["region", "tier"], seed=9)
+        r2 = e2.sample(str(p), 300, use_random=True, seed=9)
+    # stratified: identical rows AND order (fetch is ORDER BY row id)
+    assert s1.data["id"].tolist() == s2.data["id"].tolist()
+    assert sorted(r1.data["id"].tolist()) == sorted(r2.data["id"].tolist())
+
+
+def test_narrow_nan_stratum_survives_both_sources(tmp_path, engine, big_df):
+    df = big_df.copy()
+    df.loc[df.index[:2000], "region"] = None  # 10% missing stratum
+    p = tmp_path / "nanstrat.parquet"
+    df.to_parquet(p, index=False)
+    for source in (str(p), df):
+        result = engine.sample(source, 1000, strat_cols=["region"], seed=1)
+        assert len(result.data) == 1000
+        # the missing-value stratum is sampled proportionally (~100 rows)
+        nan_rows = int(result.data["region"].isna().sum())
+        assert 60 <= nan_rows <= 140
+
+
+def test_narrow_guard_reserved_column_names_fall_back(tmp_path, engine, big_df):
+    # a real column named file_row_number must not break Parquet sampling
+    decoy = big_df.copy()
+    decoy["file_row_number"] = 1
+    p = tmp_path / "decoy.parquet"
+    decoy.to_parquet(p, index=False)
+    result = engine.sample(str(p), 100, strat_cols=["region"], seed=1)
+    assert len(result.data) == 100
+    assert "file_row_number" in result.data.columns
+    assert (result.data["file_row_number"] == 1).all()
+    # same for a DataFrame column named _ds_rid
+    decoy2 = big_df.copy()
+    decoy2["_ds_rid"] = 7
+    result2 = engine.sample(decoy2, 100, strat_cols=["region"], seed=1)
+    assert len(result2.data) == 100
+    assert (result2.data["_ds_rid"] == 7).all()
+
+
+def test_narrow_hostile_strat_column_name(engine):
+    hostile = 'my col"; DROP TABLE x;--'
+    df = pd.DataFrame({hostile: (["a", "b", "c"] * 400)[:1000], "v": range(1000)})
+    result = engine.sample(df, 100, strat_cols=[hostile], seed=1)
+    assert len(result.data) == 100
+    assert set(result.data.columns) == {hostile, "v"}
+
+
+def test_narrow_dataframe_preserves_dtypes(engine):
+    # the pandas take() fetch returns slices of the original frame, so exotic
+    # dtypes (nullable string, categorical) survive exactly
+    df = pd.DataFrame(
+        {
+            "s": pd.Series((["x", "y", None] * 400)[:1000], dtype="string"),
+            "c": pd.Categorical((["g", "h"] * 500)[:1000]),
+            "grp": (["a", "b"] * 500)[:1000],
+        }
+    )
+    result = engine.sample(df, 100, strat_cols=["grp"], seed=3)
+    assert isinstance(result.data["s"].dtype, pd.StringDtype)
+    assert isinstance(result.data["c"].dtype, pd.CategoricalDtype)
+
+
+def test_narrow_wide_parquet_correctness(tmp_path, engine):
+    # 120 payload columns: all must come back, in order, exact count
+    rng = np.random.default_rng(4)
+    n = 5000
+    wide = pd.DataFrame({f"c{i:03d}": rng.normal(size=n) for i in range(120)})
+    wide.insert(0, "grp", rng.choice(["a", "b", "c", "d"], n))
+    p = tmp_path / "wide.parquet"
+    wide.to_parquet(p, index=False)
+    result = engine.sample(str(p), 200, strat_cols=["grp"], seed=5)
+    assert len(result.data) == 200
+    assert list(result.data.columns) == list(wide.columns)
+    reservoir = engine.sample(str(p), 200, use_random=True, seed=5)
+    assert len(reservoir.data) == 200
+    assert list(reservoir.data.columns) == list(wide.columns)
+
+
+def test_narrow_glob_multi_file_parquet_falls_back_and_stays_exact(tmp_path, engine, big_df):
+    """Regression (caught in verification): file_row_number is per-FILE, so the
+    narrow shape on a multi-file glob would fan winners out across files and
+    silently inflate/duplicate the sample. Globs must take the full-width
+    fallback and return exact, duplicate-free counts."""
+    for i in range(3):
+        big_df.iloc[i * 5000 : (i + 1) * 5000].to_parquet(
+            tmp_path / f"part{i}.parquet", index=False
+        )
+    glob = str(tmp_path / "*.parquet")
+    assert engine._narrow_scan(glob, ["region"]) is None  # gate: not a single file
+    strat = engine.sample(glob, 1200, strat_cols=["region"], seed=1)
+    assert len(strat.data) == 1200
+    assert not strat.data["id"].duplicated().any()
+    res = engine.sample(glob, 1200, use_random=True, seed=1)
+    assert len(res.data) == 1200
+    assert not res.data["id"].duplicated().any()
+
+
+def test_narrow_csv_keeps_single_pass_and_works(tmp_path, engine, big_df):
+    # CSV has no stable row id: the full-width single-pass shape still applies
+    p = tmp_path / "plain.csv"
+    big_df.to_csv(p, index=False)
+    assert engine._narrow_scan(str(p), ["region"]) is None
+    result = engine.sample(str(p), 300, strat_cols=["region"], seed=1)
+    assert len(result.data) == 300
+    assert set(result.data.columns) == set(big_df.columns)
+
+
 # ── module-level helpers ──────────────────────────────────────────────────────
 
 def test_should_use_engine_for_parquet(tmp_path, big_df):

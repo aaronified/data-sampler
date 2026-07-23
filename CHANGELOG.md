@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.3.0 — unreleased
+
+- **Two-phase narrow sampling in the DuckDB engine.** The expensive phase of a
+  sample (the per-stratum window sort, or the reservoir buffer) now runs over
+  only the stratification columns plus a stable row id — `file_row_number` for
+  single-file Parquet sources, a positional id for DataFrames — and a second
+  pass fetches the winning rows with every column. Measured on 300k rows ×
+  401 columns: stratified sampling 2.5× faster on Parquet and 9.5× faster for
+  DataFrame sources (whose wide payload never enters the SQL engine; winners
+  return as dtype-preserving pandas slices). CSV/TSV/JSON and multi-file
+  Parquet globs keep the previous single-pass shape (per-file row numbers are
+  not a global id — verification caught that a glob would otherwise be
+  silently over-sampled — and text formats must re-parse per scan anyway).
+  No behavioral change to counts, allocation, NaN strata, or determinism;
+  note that *which* rows a given seed selects changes vs v3.2.1 for
+  single-file Parquet and DataFrame sources.
+
 ## v3.2.1 — 2026-07-23
 
 - **Fixed a TUI race that only surfaced on slow machines** (caught by the

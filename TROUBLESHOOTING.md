@@ -232,6 +232,23 @@ all were fixed except one accepted divergence. Highlights worth remembering:
   *future* messages; a synchronous re-entrancy flag does not protect against
   them. Guard by making re-syncs conditional, not by flags alone.
 
+## Parquet file_row_number is per-file, not global (caught in verification)
+
+- **Symptom:** the first draft of two-phase narrow sampling used
+  `read_parquet(..., file_row_number=true)` as the row id for the winner
+  fetch. On a multi-file glob (`data/*.parquet`) the verifier's probe showed a
+  request for 1,200 rows silently returning 3,600 with hundreds of duplicates
+  — each winner's row number matched one row in *every* file.
+- **Cause:** DuckDB numbers `file_row_number` per file; it is only a global
+  row id for a single physical file. The fetch join fanned out across files.
+- **Fix:** `_narrow_scan` gates the Parquet narrow shape on `Path.is_file()`;
+  globs/multi-file datasets take the full-width single-pass shape, which never
+  relies on row numbers. Regression test:
+  `test_narrow_glob_multi_file_parquet_falls_back_and_stays_exact`. A
+  composite `filename + file_row_number` id could lift this restriction later.
+- **Lesson:** any "stable row id" assumption must be validated against
+  multi-file sources — the single-file case hides the fan-out completely.
+
 ## Template
 
 - **Symptom:** what was observed.

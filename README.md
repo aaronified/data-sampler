@@ -391,6 +391,16 @@ columns, in one place.
   parallelizes the partitions and spills the window sort if needed.
 - **Parquet projection pushdown.** Pass 1 and the stats queries touch only
   the columns they reference, so a wide Parquet file is never read in full.
+- **Two-phase narrow sampling.** The expensive phase (the per-stratum window
+  sort, or the reservoir buffer) runs over *only the stratification columns
+  plus a stable row id* — `file_row_number` for single-file Parquet, a
+  positional id for DataFrames — and a second pass fetches just the winning
+  rows with every column. The sort never carries the wide payload: measured
+  2.5× on a 400-column Parquet file and 9.5× for wide DataFrames (whose
+  payload never enters the SQL engine at all — winners come back as
+  dtype-preserving pandas slices). CSV/JSON and multi-file Parquet globs
+  keep the single-pass shape, which is the correct one there (text must be
+  re-parsed per scan, and per-file row numbers aren't a global id).
 - **Determinism engineering.** DuckDB's `GROUP BY` output order is
   nondeterministic, so the stratum order is pinned with `ORDER BY … NULLS
   LAST` before allocation (otherwise remainder ties break differently run to

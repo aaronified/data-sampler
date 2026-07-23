@@ -434,6 +434,72 @@ class DuckDBEngine:
 
     # ── sampling ──────────────────────────────────────────────────────────────
 
+    # column names the two-phase narrow shape needs for itself; a source that
+    # already uses one of these falls back to the single-pass full-width shape
+    _NARROW_RESERVED = frozenset({"file_row_number", "_ds_rid", "_ds_rowid", "_rn"})
+
+    def _narrow_scan(self, source, strat_cols: list[str]):
+        """Set up a two-phase "narrow" sample: rank/sample over only
+        ``strat_cols`` plus a stable row id, then fetch the winning full rows.
+
+        Sorting or reservoir-buffering the full row payload is the dominant
+        cost on wide tables; this shape makes phase 1 width-independent.
+        Returns ``(scan_sql, rid_expr, fetch)`` where ``fetch(row_ids)``
+        materializes the winners with every column — or ``None`` when the
+        source has no cheap stable row id (CSV/TSV/JSON must re-parse the
+        whole text per scan, so single-pass full-width is already the optimal
+        shape there) or a column name collides with the shape's internals.
+        """
+        if isinstance(source, pd.DataFrame):
+            if self._NARROW_RESERVED & set(map(str, source.columns)):
+                return None
+            # only the stratification columns + a positional id enter DuckDB;
+            # the wide payload never leaves pandas
+            if strat_cols:
+                narrow = source.loc[:, list(strat_cols)].reset_index(drop=True).copy()
+            else:
+                narrow = pd.DataFrame()
+            narrow["_ds_rid"] = np.arange(len(source), dtype=np.int64)
+            self._reg += 1
+            name = f"_narrow_{self._reg}"
+            self.con.register(name, narrow)
+
+            def fetch(row_ids: np.ndarray) -> pd.DataFrame:
+                # positional take preserves the original dtypes exactly
+                return source.take(np.asarray(row_ids)).reset_index(drop=True)
+
+            return name, _quote_ident("_ds_rid"), fetch
+
+        p = Path(source)
+        if p.suffix.lower() != ".parquet":
+            return None
+        # file_row_number is numbered PER FILE: it is a valid global row id
+        # only for a single physical file. Globs / multi-file datasets
+        # (data/*.parquet) must use the full-width fallback, which never
+        # relies on it — a per-file id would fan each winner out to every
+        # file sharing that row number and silently corrupt the sample.
+        # (A composite filename+row id could lift this later.)
+        if not p.is_file():
+            return None
+        if self._NARROW_RESERVED & set(map(str, self.columns(source))):
+            return None
+        scan = f"read_parquet({_quote_str(str(p))}, file_row_number=true)"
+
+        def fetch(row_ids: np.ndarray) -> pd.DataFrame:
+            self._reg += 1
+            rid_tbl = f"_rids_{self._reg}"
+            self.con.register(
+                rid_tbl, pd.DataFrame({"rid": np.asarray(row_ids, dtype=np.int64)})
+            )
+            # ORDER BY the row id: deterministic output order for seeded runs
+            return self.con.execute(
+                f"SELECT s.* EXCLUDE (file_row_number) FROM {scan} s "
+                f"JOIN {rid_tbl} r ON s.file_row_number = r.rid "
+                f"ORDER BY s.file_row_number"
+            ).df()
+
+        return scan, "file_row_number", fetch
+
     def sample(
         self,
         source,
@@ -469,29 +535,40 @@ class DuckDBEngine:
         self._set_seed(seed)
 
         if use_random:
-            return self._reservoir(src, count, seed)
+            return self._reservoir(source, src, count, seed)
 
         if strat_cols is None:
             strat_cols = self.find_stratification_columns(source, count, exclude_columns)
         if not strat_cols:
-            result = self._reservoir(src, count, seed)
+            result = self._reservoir(source, src, count, seed)
             result.notes = ["No suitable stratification columns found; using reservoir sampling."]
             return result
 
-        return self._stratified(src, count, strat_cols, seed)
+        return self._stratified(source, src, count, strat_cols, seed)
 
-    def _reservoir(self, src: str, count: int, seed: int | None) -> SampleResult:
+    def _reservoir(self, source, src: str, count: int, seed: int | None) -> SampleResult:
         rep = f" REPEATABLE ({int(seed)})" if seed is not None else ""
-        data = self.con.execute(
-            f"SELECT * FROM {src} USING SAMPLE reservoir({int(count)} ROWS){rep}"
-        ).df()
+        narrow = self._narrow_scan(source, [])
+        if narrow is not None:
+            # phase 1: reservoir over just the row id (width-independent);
+            # phase 2: fetch the winners' full rows
+            scan, rid_expr, fetch = narrow
+            row_ids = self.con.execute(
+                f"SELECT {rid_expr} AS rid FROM {scan} "
+                f"USING SAMPLE reservoir({int(count)} ROWS){rep}"
+            ).df()["rid"].to_numpy()
+            data = fetch(row_ids)
+        else:
+            data = self.con.execute(
+                f"SELECT * FROM {src} USING SAMPLE reservoir({int(count)} ROWS){rep}"
+            ).df()
         return SampleResult(
             data=data, method="random", requested=count,
             notes=["Mode: DuckDB reservoir sampling (out-of-core)"],
         )
 
     def _stratified(
-        self, src: str, count: int, strat_cols: list[str], seed: int | None
+        self, source, src: str, count: int, strat_cols: list[str], seed: int | None
     ) -> SampleResult:
         cols_sql = ", ".join(_quote_ident(c) for c in strat_cols)
         # pass 1: stratum sizes (small — one row per stratum). ORDER BY pins
@@ -515,18 +592,37 @@ class DuckDBEngine:
             f"r.{_quote_ident(c)} IS NOT DISTINCT FROM a.{_quote_ident(c)}"
             for c in strat_cols
         )
-        query = f"""
-            WITH ranked AS (
-                SELECT *, row_number() OVER (
-                    PARTITION BY {cols_sql} ORDER BY random()
-                ) AS _rn
-                FROM {src}
-            )
-            SELECT r.* EXCLUDE (_rn)
-            FROM ranked r
-            JOIN {alloc_tbl} a ON {join_on}
-            WHERE r._rn <= a._alloc
-        """
+        narrow = self._narrow_scan(source, strat_cols)
+        if narrow is not None:
+            # two-phase: rank only the strat columns + row id (the window sort
+            # never touches the wide payload), then fetch the winners' rows
+            scan, rid_expr, fetch = narrow
+            query = f"""
+                WITH ranked AS (
+                    SELECT {rid_expr} AS _ds_rowid, {cols_sql}, row_number() OVER (
+                        PARTITION BY {cols_sql} ORDER BY random()
+                    ) AS _rn
+                    FROM {scan}
+                )
+                SELECT r._ds_rowid
+                FROM ranked r
+                JOIN {alloc_tbl} a ON {join_on}
+                WHERE r._rn <= a._alloc
+            """
+        else:
+            fetch = None
+            query = f"""
+                WITH ranked AS (
+                    SELECT *, row_number() OVER (
+                        PARTITION BY {cols_sql} ORDER BY random()
+                    ) AS _rn
+                    FROM {src}
+                )
+                SELECT r.* EXCLUDE (_rn)
+                FROM ranked r
+                JOIN {alloc_tbl} a ON {join_on}
+                WHERE r._rn <= a._alloc
+            """
         # DuckDB's random() ordering is only reproducible single-threaded, so a
         # seeded run goes single-threaded for determinism; unseeded runs keep all
         # cores (the distribution is preserved either way).
@@ -535,7 +631,11 @@ class DuckDBEngine:
             self.con.execute("PRAGMA threads=1")
             self._set_seed(seed)
         try:
-            data = self.con.execute(query).df()
+            result_df = self.con.execute(query).df()
+            if fetch is not None:
+                data = fetch(result_df["_ds_rowid"].to_numpy())
+            else:
+                data = result_df
         finally:
             if reproducible:
                 self.con.execute(f"PRAGMA threads={self.threads}")

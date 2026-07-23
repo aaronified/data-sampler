@@ -89,9 +89,19 @@ its own commit.
   the per-column passes for a single cheap scalar pass over very wide inputs.
   `approx_count_distinct` also powers the engine's stratification-column selection.
 
+## v3.3
+
+- [x] **Block P7 — two-phase narrow sampling.** Rank/reservoir over only the
+  stratification columns + a stable row id (single-file Parquet
+  `file_row_number`; DataFrame positional id), then fetch the winning full
+  rows. 2.5× on wide Parquet, 9.5× on wide DataFrames. CSV/JSON and Parquet
+  globs keep the single-pass shape (per-file row ids are not global).
+
 ## Later
 
 - Optional PyInstaller EXE build of the TUI (replaces the old Tkinter EXE).
+- Composite filename+row-number id to extend narrow sampling to Parquet globs.
+- `--columns` output projection (sample only a subset of columns).
 - Rust/Polars-on-Arrow native engine (pyo3) as an alternative to DuckDB.
 - GPU acceleration (RAPIDS cuDF) for the aggregation-heavy paths.
 - Distributed backend (Dask / Ray Data / Spark) for multi-machine scale.
