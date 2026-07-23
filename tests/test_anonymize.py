@@ -6,6 +6,7 @@ import pytest
 
 from data_sampler import _names
 from data_sampler.anonymize import (
+    DatetimeJitterAnonymizer,
     NameAnonymizer,
     NumericJitterAnonymizer,
     RandomStringAnonymizer,
@@ -186,6 +187,75 @@ def test_jitter_rejects_bad_pct():
         NumericJitterAnonymizer(pct=0)
     with pytest.raises(ValueError):
         NumericJitterAnonymizer(pct=1.5)
+
+
+# ── datetime jitter ───────────────────────────────────────────────────────────
+
+def test_datetime_jitter_within_window_and_consistent():
+    ts = pd.to_datetime(
+        ["2020-01-01", "2020-06-15", "2020-01-01", "2021-12-31", None]
+    )
+    series = pd.Series(ts)
+    out = DatetimeJitterAnonymizer(max_delta="7D").transform(series, random.Random(0))
+    # dtype stays datetime
+    assert pd.api.types.is_datetime64_any_dtype(out)
+    # NaT preserved
+    assert pd.isna(out.iloc[4])
+    # rows 0 and 2 were identical → same shifted value (consistent mapping)
+    assert out.iloc[0] == out.iloc[2]
+    # every shift is within ±7 days of the original
+    window = pd.Timedelta("7D")
+    for orig, new in zip(series.iloc[:4], out.iloc[:4]):
+        assert abs(new - orig) <= window
+
+
+def test_datetime_jitter_distribution_preserved():
+    base = pd.to_datetime(["2020-01-01"] * 5 + ["2020-02-01"] * 3 + ["2020-03-01"] * 2)
+    out = DatetimeJitterAnonymizer().transform(pd.Series(base), random.Random(1))
+    assert sorted(pd.Series(base).value_counts().values) == sorted(out.value_counts().values)
+
+
+def test_datetime_jitter_coerces_string_dates():
+    series = pd.Series(["2020-01-01", "2020-01-02", "2020-01-01"])
+    out = DatetimeJitterAnonymizer(max_delta="3D").transform(series, random.Random(2))
+    assert pd.api.types.is_datetime64_any_dtype(out)
+    assert out.iloc[0] == out.iloc[2]
+
+
+def test_datetime_jitter_rejects_non_dates():
+    with pytest.raises(TypeError, match="datetime"):
+        DatetimeJitterAnonymizer().transform(pd.Series(["apple", "pear"]))
+
+
+def test_datetime_jitter_preserves_timezone():
+    series = pd.Series(pd.to_datetime(["2020-01-01", "2020-02-01"]).tz_localize("UTC"))
+    out = DatetimeJitterAnonymizer(max_delta="2D").transform(series, random.Random(3))
+    assert str(out.dtype).endswith("UTC]")
+
+
+def test_datetime_jitter_rejects_bad_delta():
+    with pytest.raises(ValueError):
+        DatetimeJitterAnonymizer(max_delta="0D")
+    # window smaller than one whole unit step
+    with pytest.raises(ValueError, match="finer unit"):
+        DatetimeJitterAnonymizer(max_delta="12h", unit="D")
+
+
+def test_datetime_jitter_unit_controls_resolution():
+    # jitter by whole days only → all outputs land on midnight
+    series = pd.Series(pd.to_datetime(["2020-01-01", "2020-06-01", "2020-12-01"]))
+    out = DatetimeJitterAnonymizer(max_delta="10D", unit="D").transform(
+        series, random.Random(4)
+    )
+    assert (out.dt.normalize() == out).all()
+
+
+def test_datetime_jitter_via_make_anonymizer_aliases():
+    series = pd.Series(pd.to_datetime(["2020-01-01", "2020-01-02"]))
+    for alias in ("datetime_jitter", "datetime", "dates"):
+        anon = make_anonymizer(alias, max_delta="5D")
+        assert isinstance(anon, DatetimeJitterAnonymizer)
+        assert pd.api.types.is_datetime64_any_dtype(anon.transform(series, random.Random(5)))
 
 
 # ── random string / hex ──────────────────────────────────────────────────────

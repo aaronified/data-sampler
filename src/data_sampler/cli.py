@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--anon", action="append", default=[], metavar="COL=KIND[:k=v,...]",
         help=(
             "anonymize a column (repeatable). KIND: names, sequential_id, "
-            "numeric_jitter, random_string, hex. "
+            "numeric_jitter, datetime_jitter, random_string, hex. "
             "Example: --anon \"id=sequential_id:start=1000,interval=7\""
         ),
     )

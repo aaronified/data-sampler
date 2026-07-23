@@ -71,6 +71,23 @@ Add an entry for every defect found by tests or manual runs.
   generated *content* (as opposed to code), always eyeball a sample of the
   actual values — count/format assertions cannot catch semantic garbage.
 
+## datetime_jitter: window smaller than its unit silently froze the column
+
+- **Symptom:** while designing `DatetimeJitterAnonymizer`, a `max_delta`
+  finer than one `unit` step (e.g. `max_delta="12h"` with `unit="D"`) made
+  the jitter span round down to 0, so every timestamp was returned unchanged
+  — anonymization that quietly does nothing.
+- **Cause:** the offset is drawn in whole `unit` steps
+  (`_span = int(max_delta / Timedelta(1, unit))`); when the window is smaller
+  than one step, `_span == 0` and `randint(0, 0)` is always 0.
+- **Fix:** reject that configuration in `__init__` with a
+  `ValueError("... use a finer unit")` instead of failing silently. The
+  default `unit="s"` keeps the span large for any realistic window.
+- **Note:** jittering a string-date column coerces it via
+  `pd.to_datetime`; non-ISO strings emit a benign pandas "Could not infer
+  format" warning and are parsed per-element (slower). Columns that cannot be
+  parsed as dates raise `TypeError`.
+
 ## Template
 
 - **Symptom:** what was observed.

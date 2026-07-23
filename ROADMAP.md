@@ -24,8 +24,21 @@ gets its own commit after tests pass and docs are updated.
   options), `python -m data_sampler`, README/CHANGELOG rewrite, wheel build
   verification. PyPI upload stays manual, after extensive testing.
 
+## v3.1
+
+- [x] **Block A — datetime jitter anonymizer.** `datetime_jitter` kind
+  (`DatetimeJitterAnonymizer`): shifts each date/time by a random offset
+  within a ±window (±7 days by default), consistent-mapping preserved, NaT
+  untouched, string-date columns coerced, timezones kept. Wired into the CLI
+  (`--anon "col=datetime_jitter:max_delta=30D"`) and the TUI config panel.
+- [ ] **Block B — anonymiser workflow.** A guided column-type workflow: name
+  a set of columns, then assign each a type by choosing from options
+  (interactive wizard), pre-specifying through a function (`AnonymizationPlan`
+  API + `suggest`), or clicking in the TUI. Types drive the anonymizers.
+- [ ] **Block C — column-level histograms in the report screen.** Per-column
+  source-vs-sample distribution histograms on the report screen (and CLI
+  text output).
+
 ## Later
 
 - Optional PyInstaller EXE build of the TUI (replaces the old Tkinter EXE).
-- Datetime jitter anonymizer.
-- Column-level histograms in the report screen.

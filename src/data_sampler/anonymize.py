@@ -13,6 +13,8 @@ Available kinds (see :data:`KINDS` for aliases):
   order of first appearance (:class:`SequentialIdAnonymizer`).
 - ``numeric_jitter`` — replace numbers with a random value within ±20 % of
   the original by default (:class:`NumericJitterAnonymizer`).
+- ``datetime_jitter`` — shift each date/time by a random offset within a
+  ±window (±7 days by default) (:class:`DatetimeJitterAnonymizer`).
 - ``random_string`` / ``hex`` — replace values with random character
   sequences or hexadecimal strings (:class:`RandomStringAnonymizer`).
 """
@@ -206,6 +208,59 @@ class NumericJitterAnonymizer(ColumnAnonymizer):
         return mapping
 
 
+class DatetimeJitterAnonymizer(ColumnAnonymizer):
+    """Shift each date/time by a random offset within ±``max_delta``.
+
+    ``max_delta`` is anything :class:`pandas.Timedelta` accepts (``"7D"``,
+    ``"12h"``, a number of ``unit`` s); it defaults to ±7 days. The offset is
+    drawn uniformly in whole ``unit`` steps (``"s"`` by default), so pick a
+    ``unit`` no coarser than the resolution you want to keep — e.g.
+    ``unit="D"`` jitters only by whole days. As with every anonymizer the
+    mapping is consistent: equal timestamps receive equal shifts, so the
+    column's shape survives. ``NaT`` is left untouched.
+
+    Non-datetime columns are coerced with :func:`pandas.to_datetime` first (so
+    date strings loaded from CSV work); a column that cannot be parsed as
+    dates raises :class:`TypeError`. Timezone-aware inputs keep their zone.
+    """
+
+    def __init__(self, max_delta: str | int | float = "7D", unit: str = "s"):
+        self.max_delta = pd.Timedelta(max_delta)
+        if self.max_delta <= pd.Timedelta(0):
+            raise ValueError("max_delta must be positive (e.g. '7D' or '12h')")
+        self.unit = unit
+        # number of whole `unit` steps that fit in max_delta (the jitter span)
+        self._span = int(self.max_delta / pd.Timedelta(1, unit))
+        if self._span < 1:
+            raise ValueError(
+                f"max_delta {max_delta!r} is smaller than one {unit!r} step; "
+                "use a finer unit"
+            )
+
+    def transform(self, series, rng=None):
+        if not pd.api.types.is_datetime64_any_dtype(series):
+            try:
+                series = pd.to_datetime(series, errors="raise")
+            except (ValueError, TypeError) as exc:
+                raise TypeError(
+                    f"datetime_jitter needs a datetime column; {series.name!r} "
+                    f"is {series.dtype} and could not be parsed as dates ({exc})"
+                ) from exc
+        return super().transform(series, rng)
+
+    def build_mapping(self, uniques, rng):
+        mapping = {}
+        for value in uniques:
+            offset = rng.randint(-self._span, self._span)
+            mapping[value] = pd.Timestamp(value) + pd.Timedelta(offset, self.unit)
+        return mapping
+
+    def _restore_dtype(self, original, result):
+        # map() over Timestamp values yields object dtype; normalize back to
+        # datetime64 (preserving tz-awareness of the coerced input)
+        return pd.to_datetime(result)
+
+
 class RandomStringAnonymizer(ColumnAnonymizer):
     """Replace values with random strings (unique within the column).
 
@@ -254,6 +309,9 @@ KINDS: dict[str, type[ColumnAnonymizer]] = {
     "numeric_jitter": NumericJitterAnonymizer,
     "numbers": NumericJitterAnonymizer,
     "jitter": NumericJitterAnonymizer,
+    "datetime_jitter": DatetimeJitterAnonymizer,
+    "datetime": DatetimeJitterAnonymizer,
+    "dates": DatetimeJitterAnonymizer,
     "random_string": RandomStringAnonymizer,
     "string": RandomStringAnonymizer,
     "hex": RandomStringAnonymizer,

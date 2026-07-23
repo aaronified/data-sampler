@@ -70,6 +70,7 @@ ANON_CHOICES = [
     ("names (from name library)", "names"),
     ("sequential id (start + interval)", "sequential_id"),
     ("numeric jitter (± percent)", "numeric_jitter"),
+    ("datetime jitter (± window)", "datetime_jitter"),
     ("random string", "random_string"),
     ("hex string", "hex"),
 ]
@@ -79,6 +80,7 @@ ANON_SHORT = {
     "names": "names",
     "sequential_id": "seq id",
     "numeric_jitter": "jitter",
+    "datetime_jitter": "date jit",
     "random_string": "string",
     "hex": "hex",
 }
@@ -111,6 +113,12 @@ def build_anonymizer(cfg: ColumnConfig):
         if (o.get("round_to") or "").strip():
             kwargs["round_to"] = int(o["round_to"])
         return make_anonymizer("numeric_jitter", **kwargs)
+    if cfg.kind == "datetime_jitter":
+        return make_anonymizer(
+            "datetime_jitter",
+            max_delta=(o.get("max_delta") or "7D").strip(),
+            unit=(o.get("unit") or "s").strip(),
+        )
     if cfg.kind == "random_string":
         return make_anonymizer(
             "random_string",
@@ -131,6 +139,8 @@ def anon_label(cfg: ColumnConfig) -> str:
         return f"seq {o.get('start') or 1}+{o.get('interval') or 1}"
     if cfg.kind == "numeric_jitter":
         return f"jitter ±{o.get('pct') or 20}%"
+    if cfg.kind == "datetime_jitter":
+        return f"date ±{o.get('max_delta') or '7D'}"
     if cfg.kind in ("random_string", "hex"):
         return f"{ANON_SHORT[cfg.kind]}[{o.get('length') or 8}]"
     return ANON_SHORT[cfg.kind]
@@ -308,6 +318,12 @@ class ColumnsScreen(Screen):
                                 yield Input("20", id="opt-jit-pct", classes="opt-input")
                                 yield Label("round to", classes="opt-label")
                                 yield Input("", id="opt-jit-round", classes="opt-input")
+                        with Vertical(id="opts-datetime_jitter"):
+                            with Horizontal(classes="optrow"):
+                                yield Label("± window", classes="opt-label")
+                                yield Input("7D", id="opt-dt-delta", classes="opt-input")
+                                yield Label("unit", classes="opt-label")
+                                yield Input("s", id="opt-dt-unit", classes="opt-input")
                         with Vertical(id="opts-random_string"):
                             with Horizontal(classes="optrow"):
                                 yield Label("length", classes="opt-label")
@@ -440,6 +456,8 @@ class ColumnsScreen(Screen):
         "opt-seq-width": ("sequential_id", "width"),
         "opt-jit-pct": ("numeric_jitter", "pct"),
         "opt-jit-round": ("numeric_jitter", "round_to"),
+        "opt-dt-delta": ("datetime_jitter", "max_delta"),
+        "opt-dt-unit": ("datetime_jitter", "unit"),
         "opt-str-length": ("random_string", "length"),
         "opt-str-prefix": ("random_string", "prefix"),
         "opt-hex-length": ("hex", "length"),
@@ -448,6 +466,7 @@ class ColumnsScreen(Screen):
     _OPT_DEFAULTS = {
         "opt-seq-start": "1", "opt-seq-interval": "1", "opt-seq-prefix": "",
         "opt-seq-width": "0", "opt-jit-pct": "20", "opt-jit-round": "",
+        "opt-dt-delta": "7D", "opt-dt-unit": "s",
         "opt-str-length": "8", "opt-str-prefix": "", "opt-hex-length": "8",
     }
 

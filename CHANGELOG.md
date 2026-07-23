@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.1 — unreleased
+
+- **Added a `datetime_jitter` anonymizer** (`DatetimeJitterAnonymizer`):
+  shifts each date/time by a random offset within a ±window (±7 days by
+  default), with consistent value mapping preserved so the column's
+  distribution shape survives. `NaT` is left untouched, string-date columns
+  are coerced via `pandas.to_datetime`, and timezone-aware inputs keep their
+  zone. Raises `ValueError` if the window is finer than its `unit`. Reachable
+  as kinds `datetime_jitter` / `datetime` / `dates`, and wired into the CLI
+  `--anon` option and the TUI anonymizer config panel.
+
 ## v3.0.1 — 2026-07-19
 
 - **Fixed the bundled name library.** The v3.0.0 library contained invented

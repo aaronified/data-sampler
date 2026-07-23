@@ -222,6 +222,7 @@ Missing values are left as missing. All anonymizers accept a seed (via
 | `names` | Realistic names from a bundled library of first, middle, and last names | `style`: `first_last`, `first_middle_last`, `last_first`, `first`, `last` |
 | `sequential_id` | `start`, `start+interval`, ... in order of first appearance | `start` (1), `interval` (1), `prefix` (`""`), `width` (0, zero-pads) |
 | `numeric_jitter` | A random number within ±`pct` of the original | `pct` (0.2 = ±20 %), `round_to` (decimal places) |
+| `datetime_jitter` | A date/time shifted by a random offset within ±`max_delta` | `max_delta` (`"7D"`; any `pandas.Timedelta` string), `unit` (`"s"`; jitter resolution) |
 | `random_string` | Random character sequences, unique per value | `length` (8), `charset` (`alphanumeric`, `letters`, `digits`, `hex`), `prefix` (`""`) |
 | `hex` | Shorthand for `random_string` with `charset="hex"` | `length` (8) |
 
