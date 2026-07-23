@@ -1,6 +1,6 @@
 # Changelog
 
-## v3.2 — unreleased
+## v3.2.0 — 2026-07-23
 
 - **Vectorized every anonymizer** (Block P1 of the v3.2 performance & scale
   effort): the transform pipeline now does a single `pd.factorize`
@@ -55,8 +55,32 @@
   input); `--interactive` remains pandas-only. When the pandas path is used
   on a large input, a note suggests the engine. Auto-selection falls back to
   pandas if the optional `duckdb` dependency is absent.
+- **Fixed 22 issues found in a pre-release six-lens adversarial audit** (one
+  accepted divergence documented in `TROUBLESHOOTING.md`): the DuckDB
+  engine's `stats()` no longer crashes on LIST/STRUCT columns or on float
+  files containing real NaN values (every NaN-sensitive aggregate is now
+  NaN-filtered); `TIME`/`INTERVAL` and nested types (`LIST`, `STRUCT`,
+  `MAP`, …) classify as `"other"` and are never treated as numeric or
+  datetime; seeded stratified sampling is now deterministic even under
+  allocation-remainder ties (stratum order is pinned before allocation);
+  columns-oriented JSON (the pandas `to_json()` default) is detected and
+  refused with guidance instead of silently sampling a single row; `--skip`
+  column names are validated against the source; `--engine auto` now
+  genuinely falls back to pandas on a DuckDB read failure instead of
+  raising.
+- Alias anonymizer kinds (e.g. `"seq"` for `sequential_id`) now canonicalize
+  on `assign`, so the interactive wizard no longer silently resets them to
+  `none`; accepting a seeded assignment in the wizard preserves its options
+  instead of discarding them. HyperLogLog-based unique counts are clamped to
+  the row count so they can no longer push `unique_pct` past 100%.
+- Performance/robustness: row counts are cached per source (3–4 fewer full
+  scans per CLI run); `compute_stats` skips the useless top-values pass for
+  numeric columns (~1.9× faster); the TUI now computes stats off the event
+  loop so loading a large file no longer freezes the UI; report histograms
+  exclude ±inf from their percentage denominators and skip near-unique
+  columns instead of drawing a meaningless top-8.
 
-## v3.1 — unreleased
+## v3.1.0 — 2026-07-23 (released with v3.2.0)
 
 - **Added a `datetime_jitter` anonymizer** (`DatetimeJitterAnonymizer`):
   shifts each date/time by a random offset within a ±window (±7 days by

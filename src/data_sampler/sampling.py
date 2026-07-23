@@ -53,9 +53,10 @@ def find_stratification_columns(
             log.debug("stratification: column %r excluded by user", col)
             continue
         series = df[col]
-        if not is_stratifiable(series, n_rows):
+        n_unique = series.nunique()
+        if not is_stratifiable(series, n_rows, n_unique=n_unique):
             continue
-        candidates.append((col, series.nunique()))
+        candidates.append((col, n_unique))
 
     # sort by fewest categories first (easiest to represent)
     candidates.sort(key=lambda x: x[1])

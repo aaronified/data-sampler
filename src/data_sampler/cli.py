@@ -184,6 +184,11 @@ def _run_with_engine(args, parser, skip) -> int:
             f"Loaded {total:,} rows, {len(cols)} columns from {args.source} "
             f"(DuckDB engine, {engine.threads} threads)"
         )
+        unknown_skip = [c for c in skip if c not in cols]
+        if unknown_skip:
+            parser.error(
+                f"--skip: column(s) not found in file: {', '.join(unknown_skip)}"
+            )
         spec = _build_engine_spec(args, parser, engine, cols)
         result = engine.sample(
             args.source, args.count,
@@ -257,16 +262,32 @@ def main(argv: list[str] | None = None) -> int:
             )
         try:
             return _run_with_engine(args, parser, skip)
-        except DuckDBUnavailable as exc:
+        except (DuckDBUnavailable, ValueError) as exc:
+            # ValueError: source DuckDB can't read (unsupported format,
+            # columns-oriented JSON, ...)
             if args.engine == "duckdb":
                 parser.error(str(exc))
+            print(f"Note: DuckDB engine declined ({exc}); using pandas.")
             use_engine = False  # auto: fall back to pandas
+        except Exception as exc:
+            # real DuckDB read/parse failures (InvalidInputException etc.) are
+            # duckdb.Error subclasses, NOT ValueError — under auto they must
+            # also fall back to pandas instead of escaping as a traceback
+            if not type(exc).__module__.startswith("duckdb"):
+                raise
+            if args.engine == "duckdb":
+                parser.error(f"DuckDB engine failed: {exc}")
+            print(f"Note: DuckDB engine failed ({type(exc).__name__}); using pandas.")
+            use_engine = False
 
     df = load_file(args.source, sheet=args.sheet)
     print(f"Loaded {len(df)} rows, {len(df.columns)} columns from {args.source}")
     warn = large_materialization_warning(len(df), len(df.columns))
     if warn and duckdb_available():
         print(f"Note: {warn}")
+    unknown_skip = [c for c in skip if c not in df.columns]
+    if unknown_skip:
+        parser.error(f"--skip: column(s) not found in file: {', '.join(unknown_skip)}")
 
     # parse explicit --anon flags into (column, kind, options) triples
     anon_specs: list[tuple[str, str, dict]] = []

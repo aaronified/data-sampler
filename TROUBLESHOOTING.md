@@ -179,6 +179,36 @@ they are not "fixed" by mistake later:
   remainder` never exceeds the stratum size (a `np.minimum` clamp guards the
   edge); the allocations always sum to exactly `count`.
 
+## Pre-release audit findings (v3.2, 22 confirmed)
+
+A six-lens adversarial audit before the v3.2.0 release confirmed 22 issues;
+all were fixed except one accepted divergence. Highlights worth remembering:
+
+- **DuckDB treats NaN as a value, not NULL** — unfiltered, NaN poisons
+  `min`/`max` and makes `stddev_samp` raise "out of range". Every NaN-sensitive
+  numeric aggregate in `engine.stats()` now carries
+  `FILTER (WHERE NOT isnan(...))`. This only bites *file* sources: registering
+  a pandas frame converts NaN → NULL, so DataFrame-based tests can't catch it.
+- **DuckDB type names bite substring checks** — `INTERVAL` matched the `"int"`
+  numeric prefix and `INTEGER[]` (a LIST) matched `integer`, crashing the
+  shared aggregate query. `_duckdb_kind` now routes nested types (`…[]`,
+  `STRUCT`, `MAP`, …) and `TIME`/`INTERVAL` to `"other"` before any prefix
+  check, and both stats and stratification selection classify through it.
+- **`GROUP BY` row order is nondeterministic in DuckDB** — allocation broke
+  remainder ties by position, so even seeded stratified runs could differ.
+  Pass 1 now pins stratum order with `ORDER BY … NULLS LAST`.
+- **Columns-oriented JSON (the pandas `to_json()` default) parses as ONE row**
+  of structs in DuckDB. The engine detects that shape and refuses with
+  guidance; `--engine auto` falls back to pandas.
+- **Alias kinds broke the wizard** — `plan.assign("id", "seq")` stored the
+  alias, which the menu didn't recognize, so pressing Enter silently reset the
+  column to `none` (shipping it unanonymized). `assign` now canonicalizes
+  aliases; accepting the current kind preserves its options.
+- **Accepted divergence:** the pandas and DuckDB paths break largest-remainder
+  allocation *ties* differently, so the two engines can allocate tied strata
+  differently under the same seed. Each engine is internally deterministic;
+  cross-engine identical samples were never promised.
+
 ## Template
 
 - **Symptom:** what was observed.

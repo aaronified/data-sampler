@@ -219,11 +219,14 @@ class FileScreen(Screen):
         app: DataSamplerApp = self.app  # type: ignore[assignment]
         try:
             df = load_file(path, sheet=sheet)
+            # stats stay in this worker thread too: on large frames they take
+            # seconds, which would freeze the UI if run in on_mount
+            stats = compute_stats(df)
         except Exception as exc:  # surfaced to the user, never crash the TUI
             log.exception("load failed")
             app.call_from_thread(self._load_failed, exc)
             return
-        app.call_from_thread(self._loaded, path, sheet, df)
+        app.call_from_thread(self._loaded, path, sheet, df, stats)
 
     def _load_failed(self, exc: Exception) -> None:
         self.query_one("#load", Button).disabled = False
@@ -231,7 +234,9 @@ class FileScreen(Screen):
             Text(f"✗ {type(exc).__name__}: {exc}", style=RED)
         )
 
-    def _loaded(self, path: str, sheet: str | None, df: pd.DataFrame) -> None:
+    def _loaded(
+        self, path: str, sheet: str | None, df: pd.DataFrame, stats: list | None = None
+    ) -> None:
         self.query_one("#load", Button).disabled = False
         self.query_one("#file-status", Static).update(
             Text(f"✓ {len(df):,} rows × {len(df.columns)} columns", style=GREEN)
@@ -240,6 +245,7 @@ class FileScreen(Screen):
         app.df = df
         app.source_path = path
         app.sheet = sheet
+        app.column_stats = stats
         app.push_screen(ColumnsScreen())
 
 
@@ -358,7 +364,10 @@ class ColumnsScreen(Screen):
         self.query_one("#runbar").border_title = "sample"
 
         df = app.df
-        self.stats = {s.name: s for s in compute_stats(df)}
+        # stats were precomputed in the file-load worker thread; the inline
+        # compute_stats is only a fallback for screens pushed directly (tests)
+        stats_list = app.column_stats if app.column_stats is not None else compute_stats(df)
+        self.stats = {s.name: s for s in stats_list}
         self.configs = {str(c): ColumnConfig() for c in df.columns}
 
         table = self.query_one("#columns-table", DataTable)
@@ -870,6 +879,7 @@ class DataSamplerApp(App):
         self.df: pd.DataFrame | None = None
         self.source_path: str | None = None
         self.sheet: str | None = None
+        self.column_stats: list | None = None  # precomputed by the load worker
 
     def on_mount(self) -> None:
         # keep log lines off the live display

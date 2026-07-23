@@ -78,13 +78,14 @@ def sparkline(counts: list[int]) -> str:
     return "".join(out)
 
 
-def is_stratifiable(series: pd.Series, n_rows: int) -> bool:
+def is_stratifiable(series: pd.Series, n_rows: int, n_unique: int | None = None) -> bool:
     """Whether a column passes the auto-stratification candidate checks.
 
     Mirrors the selection rules used by
-    :func:`data_sampler.sampling.find_stratification_columns`.
+    :func:`data_sampler.sampling.find_stratification_columns`. Pass a
+    precomputed ``n_unique`` to avoid a second ``nunique`` hash pass.
     """
-    n_unique = series.nunique()
+    n_unique = series.nunique() if n_unique is None else n_unique
     if n_unique > min(100, n_rows * 0.5):
         return False
     if n_unique < 2:
@@ -136,7 +137,7 @@ def compute_column_stats(series: pd.Series, n_rows: int | None = None) -> Column
         missing_pct=missing / len(series) * 100 if len(series) else 0.0,
         unique=unique,
         unique_pct=unique / count * 100 if count else 0.0,
-        stratifiable=is_stratifiable(series, n_rows),
+        stratifiable=is_stratifiable(series, n_rows, n_unique=unique),
     )
 
     if kind == "numeric" and count > 0:
@@ -155,12 +156,14 @@ def compute_column_stats(series: pd.Series, n_rows: int | None = None) -> Column
                 for i in range(len(counts))
             ]
 
-    if count > 0:
+    # top values only for non-numeric columns: numeric columns render their
+    # histogram instead, and stringifying millions of numbers just to throw
+    # the result away dominated this function's runtime (~60% on 1M rows)
+    if count > 0 and kind != "numeric":
         vc = non_null.astype(str).value_counts().head(8)
         stats.top_values = [(str(v), int(c)) for v, c in vc.items()]
-        if kind != "numeric":
-            stats.histogram = [int(c) for c in vc.values]
-            stats.histogram_labels = [str(v) for v in vc.index]
+        stats.histogram = [int(c) for c in vc.values]
+        stats.histogram_labels = [str(v) for v in vc.index]
 
     return stats
 

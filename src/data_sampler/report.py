@@ -84,18 +84,29 @@ def column_histogram_data(
                 f"{_fmt_num(float(edges[i]))} – {_fmt_num(float(edges[i + 1]))}"
                 for i in range(len(source_counts))
             ]
+            # percentages over the FINITE counts the bins were built from —
+            # ±inf values are excluded from the bars, so including them in the
+            # denominator would silently deflate every percentage
+            src_total = len(s_src) or 1
+            samp_total = len(s_samp) or 1
         else:
-            src_vc = src.dropna().astype(str).value_counts()
-            if src_vc.empty:
+            src_nonnull = src.dropna()
+            if src_nonnull.empty:
                 continue
+            # a near-unique column (ids, emails, free text) has no meaningful
+            # top-8 distribution — skip it rather than hash-count every value
+            # to draw eight bars of count 1
+            n_unique = src_nonnull.nunique()
+            if n_unique > max(100, 0.5 * len(src_nonnull)):
+                continue
+            src_vc = src_nonnull.astype(str).value_counts()
             top_labels = list(src_vc.head(top).index)
             samp_vc = samp.dropna().astype(str).value_counts()
             source_counts = np.array([int(src_vc.get(l, 0)) for l in top_labels])
             sample_counts = np.array([int(samp_vc.get(l, 0)) for l in top_labels])
             labels = [str(l) for l in top_labels]
-
-        src_total = int(src.notna().sum()) or 1
-        samp_total = int(samp.notna().sum()) or 1
+            src_total = int(src.notna().sum()) or 1
+            samp_total = int(samp.notna().sum()) or 1
         out.append(
             {
                 "name": str(col),

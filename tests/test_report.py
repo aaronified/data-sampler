@@ -103,3 +103,20 @@ def test_format_column_histograms_text(demo_df):
 def test_format_column_histograms_empty_when_no_columns():
     empty = pd.DataFrame()
     assert format_column_histograms(empty, empty) == ""
+
+
+def test_column_histogram_inf_does_not_deflate_percentages():
+    # ±inf is excluded from the bars, so it must be excluded from the
+    # denominator too — percentages of the finite values sum to ~100
+    src = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, np.inf, -np.inf]})
+    samp = src.head(4)
+    d = next(iter(column_histogram_data(src, samp)))
+    assert abs(sum(d["source_pct"]) - 100.0) < 1e-6
+    assert abs(sum(d["sample_pct"]) - 100.0) < 1e-6
+
+
+def test_column_histogram_skips_near_unique_columns(demo_df):
+    result = sample(demo_df, 200, random_state=1)
+    names = {d["name"] for d in column_histogram_data(demo_df, result.data)}
+    assert "name" not in names  # 1000 unique of 1000: no meaningful top-8
+    assert "region" in names and "score" in names  # real distributions kept

@@ -236,6 +236,55 @@ def test_choose_interactively_without_df_uses_menu_only():
     assert plan.type_of("x") == "names"
 
 
+# ── audit regressions (v3.2 pre-release audit) ───────────────────────────────
+
+def test_assign_canonicalizes_alias_kinds():
+    plan = AnonymizationPlan().assign("c", "seq", start=100)
+    assert plan.type_of("c") == "sequential_id"  # not the raw alias
+    for alias, canonical in (
+        ("name", "names"), ("jitter", "numeric_jitter"),
+        ("dates", "datetime_jitter"), ("string", "random_string"),
+    ):
+        assert AnonymizationPlan().assign("c", alias).type_of("c") == canonical
+
+
+def test_wizard_enter_keeps_alias_seeded_assignment():
+    # an --anon seeded with an alias kind must survive pressing Enter
+    prompt = FakePrompt([""])
+    plan = AnonymizationPlan.for_columns(["user_id"])
+    plan.assign("user_id", "seq", start=100)
+    plan.choose_interactively(columns=["user_id"], prompt=prompt, echo=lambda _l: None)
+    assert plan.type_of("user_id") == "sequential_id"
+    assert plan.assignments["user_id"][1] == {"start": 100}
+
+
+def test_wizard_accept_preserves_options_change_resets():
+    plan = AnonymizationPlan.for_columns(["salary"])
+    plan.assign("salary", "numeric_jitter", pct=0.05)
+    # Enter (accept current kind) keeps the seeded options
+    plan.choose_interactively(
+        columns=["salary"], prompt=FakePrompt([""]), echo=lambda _l: None
+    )
+    assert plan.assignments["salary"] == ("numeric_jitter", {"pct": 0.05})
+    # choosing a DIFFERENT kind starts from that kind's defaults
+    plan.choose_interactively(
+        columns=["salary"], prompt=FakePrompt(["7"]), echo=lambda _l: None
+    )  # option 7 = hex
+    assert plan.assignments["salary"] == ("hex", {})
+
+
+def test_suggest_type_never_jitters_other_kind():
+    # TIME / INTERVAL / nested columns surface as kind "other" from the
+    # engine; even a date-ish NAME must not suggest datetime_jitter for them
+    from data_sampler.stats import ColumnStats
+
+    cs = ColumnStats(
+        name="start_time", dtype="TIME", kind="other",
+        count=100, missing=0, missing_pct=0.0, unique=50, unique_pct=50.0,
+    )
+    assert suggest_type(cs) == "none"
+
+
 # ── public API surface ───────────────────────────────────────────────────────
 
 def test_public_api_exposes_workflow():

@@ -232,6 +232,113 @@ def test_stats_empty_frame_no_crash(engine):
     assert stats["a"].histogram == []
 
 
+# ── audit regressions (v3.2 pre-release audit) ───────────────────────────────
+
+def test_duckdb_kind_classification():
+    from data_sampler.engine import _duckdb_kind
+
+    assert _duckdb_kind("INTEGER[]") == "other"          # list, not numeric
+    assert _duckdb_kind("DECIMAL(6,2)[]") == "other"
+    assert _duckdb_kind("STRUCT(a INTEGER)") == "other"
+    assert _duckdb_kind("MAP(VARCHAR, INTEGER)") == "other"
+    assert _duckdb_kind("TIME") == "other"               # not datetime-jitterable
+    assert _duckdb_kind("INTERVAL") == "other"           # not numeric ("int" prefix!)
+    assert _duckdb_kind("TIMESTAMP WITH TIME ZONE") == "datetime"
+    assert _duckdb_kind("DATE") == "datetime"
+    assert _duckdb_kind("ENUM('a', 'b')") == "categorical"
+    assert _duckdb_kind("DECIMAL(6,2)") == "numeric"
+    assert _duckdb_kind("BOOLEAN") == "boolean"
+
+
+def test_stats_survives_list_column_and_nan_float(tmp_path, engine):
+    # LIST column must not poison the shared aggregate query, and a float
+    # column containing real NaN VALUES (Parquet keeps NaN, unlike pandas
+    # registration which nulls it) must not crash stddev
+    df = pd.DataFrame(
+        {
+            "lst": [[1, 2], [3], [4, 5], []],
+            "x": [1.0, float("nan"), 3.0, 5.0],
+            "label": ["a", "b", "a", "c"],
+        }
+    )
+    p = tmp_path / "nan_list.parquet"
+    df.to_parquet(p, index=False)
+    stats = {s.name: s for s in engine.stats(str(p))}
+    assert stats["lst"].kind == "other"
+    x = stats["x"]
+    assert x.kind == "numeric"
+    # aggregates computed over the finite values only
+    assert x.min == 1.0 and x.max == 5.0
+    assert x.std is not None
+    assert stats["label"].top_values
+
+
+def test_stats_unknown_column_raises(engine, big_df):
+    with pytest.raises(KeyError, match="ghost"):
+        engine.stats(big_df, columns=["ghost"])
+
+
+def test_stats_unique_never_exceeds_count(engine, big_df):
+    for s in engine.stats(big_df):
+        assert s.unique <= max(s.count, 0)
+
+
+def test_stratified_seeded_deterministic_under_remainder_ties():
+    # 10 equal strata sampled to 105: every stratum's remainder ties at 0.5,
+    # so the +1 slots are tie-broken — the stratum order must be pinned or
+    # even seeded runs differ
+    df = pd.DataFrame(
+        {
+            "stratum": np.repeat([f"s{i:02d}" for i in range(10)], 100),
+            "id": range(1000),
+        }
+    )
+    with DuckDBEngine(threads=4) as e1:
+        a = e1.sample(df, 105, strat_cols=["stratum"], seed=5)
+    with DuckDBEngine(threads=4) as e2:
+        b = e2.sample(df, 105, strat_cols=["stratum"], seed=5)
+    assert len(a.data) == len(b.data) == 105
+    assert sorted(a.data["id"].tolist()) == sorted(b.data["id"].tolist())
+    pd.testing.assert_series_equal(
+        a.allocations.sort_index(), b.allocations.sort_index()
+    )
+
+
+def test_columns_oriented_json_rejected(tmp_path, engine, big_df):
+    # pandas to_json() default (orient="columns") parses as ONE row of structs
+    # in DuckDB — the engine must refuse instead of silently sampling garbage
+    p = tmp_path / "cols.json"
+    big_df.head(20).to_json(p)
+    with pytest.raises(ValueError, match="columns-oriented"):
+        engine.row_count(str(p))
+    # records-oriented JSON stays fully supported
+    p2 = tmp_path / "records.json"
+    big_df.head(20).to_json(p2, orient="records")
+    assert engine.row_count(str(p2)) == 20
+
+
+def test_sample_all_rows_warns_on_large_source(engine, monkeypatch):
+    import data_sampler.engine as eng
+
+    monkeypatch.setattr(eng, "LARGE_ROW_THRESHOLD", 10)
+    df = pd.DataFrame({"a": range(20)})
+    result = engine.sample(df, 25)
+    assert result.method == "all"
+    assert any("WARNING" in n and "Materializing" in n for n in result.notes)
+
+
+def test_row_count_cached_per_file(tmp_path, big_df):
+    p = tmp_path / "counted.csv"
+    big_df.to_csv(p, index=False)
+    with DuckDBEngine(threads=2) as e:
+        assert e.row_count(str(p)) == 20_000
+        src = e._source_sql(str(p))
+        assert e._count_cache[src] == 20_000  # cached
+        # sample() reuses the cache instead of re-scanning
+        result = e.sample(str(p), 50, use_random=True, seed=1)
+        assert len(result.data) == 50
+
+
 # ── module-level helpers ──────────────────────────────────────────────────────
 
 def test_should_use_engine_for_parquet(tmp_path, big_df):

@@ -190,3 +190,40 @@ def test_cli_engine_csv_stratified(csv_file):
     assert code == 0
     df = pd.read_csv(csv_file.parent / "data_sample_50.csv")
     assert len(df) == 50
+
+
+@needs_duckdb
+def test_cli_engine_forced_on_excel_errors_cleanly(tmp_path, demo_df):
+    src = tmp_path / "data.xlsx"
+    demo_df.head(50).to_excel(src, index=False)
+    with pytest.raises(SystemExit):  # parser.error, not a raw traceback
+        main([str(src), "10", "--engine", "duckdb"])
+
+
+def test_cli_unknown_skip_column_exits_pandas(csv_file):
+    with pytest.raises(SystemExit):
+        main([str(csv_file), "10", "--skip", "Region"])  # wrong case
+
+
+@needs_duckdb
+def test_cli_unknown_skip_column_exits_engine(parquet_file):
+    with pytest.raises(SystemExit):
+        main([str(parquet_file), "10", "--engine", "duckdb", "--skip", "ghost"])
+
+
+@needs_duckdb
+def test_cli_engine_rejects_columns_oriented_json(tmp_path, demo_df):
+    p = tmp_path / "cols.json"
+    demo_df.head(20).to_json(p)  # pandas default orient="columns"
+    with pytest.raises(SystemExit):  # clean parser.error, not silent garbage
+        main([str(p), "5", "--engine", "duckdb"])
+
+
+@needs_duckdb
+def test_should_use_engine_never_picks_excel(tmp_path):
+    from data_sampler.engine import should_use_engine
+
+    # even a huge .xlsx must not auto-select the engine (DuckDB can't read it)
+    p = tmp_path / "big.xlsx"
+    p.write_bytes(b"0" * 200_000_000)
+    assert should_use_engine(str(p)) is False

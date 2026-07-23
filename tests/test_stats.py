@@ -23,6 +23,9 @@ def test_numeric_column_stats(demo_df):
     assert s.min <= s.median <= s.max
     assert len(s.histogram) == 10
     assert sum(s.histogram) == s.count
+    # numeric columns render their histogram; top-values are skipped since
+    # stringifying every number dominated runtime and nothing consumed them
+    assert s.top_values == []
 
 
 def test_categorical_column_stats(demo_df):

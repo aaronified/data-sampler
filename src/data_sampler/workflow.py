@@ -51,6 +51,19 @@ TYPE_OPTIONS: list[tuple[str, str, str]] = [
 TYPE_LABELS: dict[str, str] = {kind: label for kind, label, _ in TYPE_OPTIONS}
 TYPE_KINDS: tuple[str, ...] = tuple(kind for kind, _, _ in TYPE_OPTIONS)
 
+# alias → canonical menu kind (anonymize.KINDS accepts e.g. "seq"/"jitter";
+# the plan stores the canonical name so the wizard/TUI menus recognize it)
+_CANONICAL_KINDS: dict[str, str] = {
+    "name": "names",
+    "sequential": "sequential_id",
+    "seq": "sequential_id",
+    "numbers": "numeric_jitter",
+    "jitter": "numeric_jitter",
+    "datetime": "datetime_jitter",
+    "dates": "datetime_jitter",
+    "string": "random_string",
+}
+
 # column-name substrings that hint at a semantic type
 _NAME_HINTS = ("name", "surname", "firstname", "lastname", "fullname", "contact")
 _EMAIL_HINTS = ("email", "e-mail", "mail")
@@ -95,7 +108,9 @@ def suggest_type(stats: ColumnStats) -> str:
         return "hex"
     if name_has(_NAME_HINTS):
         return "names"
-    if stats.kind in ("categorical", "text", "other") and _has_date_token(lname):
+    # only string-ish columns can hold parseable date strings; "other" kinds
+    # (TIME, INTERVAL, nested types) must never be datetime-jittered
+    if stats.kind in ("categorical", "text") and _has_date_token(lname):
         return "datetime_jitter"
     id_like = name_has(_ID_HINTS) and stats.unique_pct >= 90
     if stats.kind == "numeric":
@@ -155,7 +170,9 @@ class AnonymizationPlan:
             self.assignments[column] = ("none", {})
             return self
         make_anonymizer(key, **options)  # validate kind + options now
-        self.assignments[column] = (key, dict(options))
+        # store the canonical kind so menus (wizard/TUI) recognize it — an
+        # alias like "seq" would otherwise default the wizard back to "none"
+        self.assignments[column] = (_CANONICAL_KINDS.get(key, key), dict(options))
         return self
 
     def clear(self, column: str) -> "AnonymizationPlan":
@@ -227,7 +244,11 @@ class AnonymizationPlan:
                 except ValueError:
                     pass
             kind = TYPE_OPTIONS[choice - 1][0]
-            self.assignments[col] = (kind, {})
+            # accepting the column's current kind keeps its options (e.g. a
+            # seeded --anon "id=sequential_id:start=1000"); choosing a
+            # different kind starts from that kind's defaults
+            cur_kind, cur_opts = self.assignments.get(col, ("none", {}))
+            self.assignments[col] = (kind, dict(cur_opts) if kind == cur_kind else {})
             echo(f"  → {TYPE_LABELS[kind]}")
             echo("")
         return self

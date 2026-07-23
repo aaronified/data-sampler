@@ -85,17 +85,26 @@ def _to_float(v) -> float | None:
 def _duckdb_kind(dtype: str) -> str:
     """Map a DuckDB column type name to a :class:`ColumnStats` kind."""
     d = dtype.lower()
+    # nested/wrapped types first: INTEGER[], DECIMAL(6,2)[], STRUCT(...), MAP(...)
+    # would otherwise match the scalar numeric prefixes and crash the numeric
+    # aggregates ("Unimplemented type for cast (INTEGER[] -> DOUBLE)")
+    if d.endswith("]") or d.startswith(("struct", "map", "list", "union", "array", "json")):
+        return "other"
     if d.startswith("bool"):
         return "boolean"
-    if d.startswith(("date", "timestamp", "time", "interval")):
+    if d.startswith(("timestamp", "date")):
         return "datetime"
+    # TIME (no date part) and INTERVAL (timedelta) cannot be datetime-jittered
+    # or averaged; "interval" must also never match the "int" numeric prefix
+    if d.startswith(("time", "interval")):
+        return "other"
     if d.startswith((
         "tinyint", "smallint", "integer", "int", "bigint", "hugeint",
         "utinyint", "usmallint", "uinteger", "ubigint", "uhugeint",
         "decimal", "double", "float", "real", "numeric",
     )):
         return "numeric"
-    if d.startswith(("varchar", "char", "text", "string", "uuid", "bit", "blob")):
+    if d.startswith(("varchar", "char", "text", "string", "uuid", "bit", "blob", "enum")):
         return "categorical"  # refined to "text" by average length
     return "other"
 
@@ -145,6 +154,10 @@ class DuckDBEngine:
             f"PRAGMA temp_directory={_quote_str(temp_directory or tempfile.gettempdir())}"
         )
         self._reg = 0
+        # per-source row-count cache: one engine session assumes its file
+        # sources do not change underneath it, so count(*) runs once per file
+        # instead of once per operation (row_count/sample/strat-selection/stats)
+        self._count_cache: dict[str, int] = {}
         log.info("DuckDBEngine ready (threads=%d, memory_limit=%s)", self.threads, memory_limit)
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -181,7 +194,26 @@ class DuckDBEngine:
         if ext == ".tsv":
             return f"read_csv({path}, header=true, auto_detect=true, delim='\t')"
         if ext == ".json":
-            return f"read_json_auto({path})"
+            expr = f"read_json_auto({path})"
+            # DuckDB parses a columns-oriented JSON document — the DEFAULT
+            # output of pandas DataFrame.to_json() — as ONE row of index-keyed
+            # STRUCTs, which would silently corrupt the sample. Detect that
+            # shape (1 row, all STRUCT/MAP columns) and refuse with guidance.
+            info = self.con.execute(f"DESCRIBE SELECT * FROM {expr}").fetchall()
+            if info and all(
+                str(r[1]).upper().startswith(("STRUCT", "MAP")) for r in info
+            ):
+                n = self.con.execute(
+                    f"SELECT count(*) FROM (SELECT * FROM {expr} LIMIT 2) t"
+                ).fetchone()[0]
+                if int(n) == 1:
+                    raise ValueError(
+                        f"{p.name} looks columns-oriented (the pandas to_json "
+                        "default); the DuckDB engine reads records-oriented or "
+                        "newline-delimited JSON — re-save with "
+                        "orient='records' (or lines=True), or use --engine pandas"
+                    )
+            return expr
         raise ValueError(
             f"DuckDB engine cannot read '{ext}' natively; supported: "
             f"{', '.join(_NATIVE_READERS)} (or pass a pandas DataFrame)"
@@ -189,9 +221,18 @@ class DuckDBEngine:
 
     # ── introspection ─────────────────────────────────────────────────────────
 
+    def _count(self, source, src_sql: str) -> int:
+        """Row count of ``source``, cached per file (free for DataFrames)."""
+        if isinstance(source, pd.DataFrame):
+            return len(source)
+        if src_sql not in self._count_cache:
+            self._count_cache[src_sql] = int(
+                self.con.execute(f"SELECT count(*) FROM {src_sql}").fetchone()[0]
+            )
+        return self._count_cache[src_sql]
+
     def row_count(self, source) -> int:
-        src = self._source_sql(source)
-        return int(self.con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+        return self._count(source, self._source_sql(source))
 
     def columns(self, source) -> list[str]:
         src = self._source_sql(source)
@@ -212,32 +253,34 @@ class DuckDBEngine:
         distinct counts (HyperLogLog) so it stays cheap on huge inputs."""
         exclude = set(exclude)
         src = self._source_sql(source)
-        n_rows = int(self.con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+        n_rows = self._count(source, src)
         info = self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()
-        cols = [(r[0], str(r[1]).lower()) for r in info if r[0] not in exclude]
+        # classify via _duckdb_kind so type rules match stats() (and never
+        # match INTERVAL against the "int" numeric prefix)
+        cols = [
+            (r[0], _duckdb_kind(str(r[1]))) for r in info if r[0] not in exclude
+        ]
         if not cols:
             return []
 
-        # one pass: approx distinct per column (HLL) + avg text length for strings
+        # one pass: approx distinct per column (HLL) + avg text length for
+        # string-ish columns (VARCHAR and ENUM both take this rule)
         parts = []
-        for name, dtype in cols:
+        for name, kind in cols:
             q = _quote_ident(name)
             parts.append(f"approx_count_distinct({q}) AS {_quote_ident(name + '::nd')}")
-            if any(t in dtype for t in ("char", "varchar", "text", "string")):
+            if kind == "categorical":
                 parts.append(
                     f"avg(length(CAST({q} AS VARCHAR))) AS {_quote_ident(name + '::len')}"
                 )
         row = self.con.execute(f"SELECT {', '.join(parts)} FROM {src}").fetchdf().iloc[0]
 
         candidates: list[tuple[str, int]] = []
-        for name, dtype in cols:
+        for name, kind in cols:
             n_unique = int(row[name + "::nd"] or 0)
             if n_unique < 2 or n_unique > min(100, n_rows * 0.5):
                 continue
-            is_numeric = any(
-                t in dtype for t in ("int", "decimal", "double", "float", "real", "hugeint")
-            )
-            if is_numeric and n_unique > min(20, n_rows * 0.3):
+            if kind == "numeric" and n_unique > min(20, n_rows * 0.3):
                 continue
             if (name + "::len") in row and (row[name + "::len"] or 0) > 50:
                 continue
@@ -278,10 +321,16 @@ class DuckDBEngine:
         """
         con = self.con
         src = self._source_sql(source)
-        total = int(con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+        total = self._count(source, src)
         info = con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()
         col_types = {r[0]: str(r[1]) for r in info}
-        cols = list(col_types) if columns is None else [c for c in columns if c in col_types]
+        if columns is None:
+            cols = list(col_types)
+        else:
+            cols = [str(c) for c in columns]
+            unknown = [c for c in cols if c not in col_types]
+            if unknown:
+                raise KeyError(f"Column(s) not found in source: {', '.join(unknown)}")
         if not cols:
             return []
 
@@ -297,13 +346,17 @@ class DuckDBEngine:
                 + f" AS {a}_nd"
             )
             if kind == "numeric":
+                # NaN is a VALUE to DuckDB, not NULL: unfiltered, it poisons
+                # min/max and makes stddev_samp raise "out of range" — filter
+                # every NaN-sensitive aggregate down to finite values
+                fin = f"FILTER (WHERE NOT isnan({q}::DOUBLE))"
                 parts += [
-                    f"min({q})::DOUBLE AS {a}_min",
-                    f"max({q})::DOUBLE AS {a}_max",
-                    f"avg({q}::DOUBLE) AS {a}_avg",
-                    f"stddev_samp({q}::DOUBLE) AS {a}_std",
+                    f"min({q}::DOUBLE) {fin} AS {a}_min",
+                    f"max({q}::DOUBLE) {fin} AS {a}_max",
+                    f"avg({q}::DOUBLE) {fin} AS {a}_avg",
+                    f"stddev_samp({q}::DOUBLE) {fin} AS {a}_std",
                     (f"approx_quantile({q}::DOUBLE, 0.5)" if approximate
-                     else f"quantile_cont({q}::DOUBLE, 0.5)") + f" AS {a}_med",
+                     else f"quantile_cont({q}::DOUBLE, 0.5)") + f" {fin} AS {a}_med",
                 ]
             elif kind == "categorical":
                 parts.append(f"avg(length(CAST({q} AS VARCHAR))) AS {a}_len")
@@ -315,7 +368,9 @@ class DuckDBEngine:
             kind = _duckdb_kind(col_types[c])
             count = int(row[f"{a}_cnt"] or 0)
             missing = total - count
-            unique = int(row[f"{a}_nd"] or 0)
+            # clamp: HLL can overestimate distinct counts past the row count,
+            # which would push unique_pct over 100% and skew suggest_type
+            unique = min(int(row[f"{a}_nd"] or 0), count)
             if kind == "categorical" and (row.get(f"{a}_len") or 0) > 50:
                 kind = "text"
 
@@ -351,14 +406,14 @@ class DuckDBEngine:
         if kind == "numeric" and cs.min is not None and cs.max is not None and cs.min < cs.max:
             lo, hi = float(cs.min), float(cs.max)
             width = hi - lo
-            # equal-width bins via floor (width_bucket isn't available in DuckDB);
-            # clamp to [0, bins-1] so the max value lands in the last bin. The
-            # `x = x` predicate drops NaN (inf can't occur: cs.min/max are finite)
+            # equal-width bins via floor (width_bucket isn't available in
+            # DuckDB); clamp to [0, bins-1] so the max value lands in the last
+            # bin, and drop NaN explicitly (NaN is a value, not NULL, in DuckDB)
             rows = con.execute(
                 f"SELECT least({bins - 1}, greatest(0, CAST(floor("
                 f"({q}::DOUBLE - {lo!r}) / {width!r} * {bins}) AS INTEGER))) AS b, "
                 f"count(*) AS n FROM {src} "
-                f"WHERE {q} IS NOT NULL AND {q}::DOUBLE = {q}::DOUBLE GROUP BY b"
+                f"WHERE {q} IS NOT NULL AND NOT isnan({q}::DOUBLE) GROUP BY b"
             ).fetchall()
             counts = [0] * bins
             for b, n in rows:
@@ -394,15 +449,22 @@ class DuckDBEngine:
         pass ``strat_cols`` to force a set. Only the sample is materialized.
         """
         src = self._source_sql(source)
-        total = int(self.con.execute(f"SELECT count(*) FROM {src}").fetchone()[0])
+        total = self._count(source, src)
         log.info("engine sampling %d of %d rows (random=%s)", count, total, use_random)
 
         if count >= total:
+            notes = [f"Requested {count} rows but source has {total}. Returning all rows."]
+            if total >= LARGE_ROW_THRESHOLD:
+                # the whole point of this engine is to never materialize the
+                # source — warn loudly before honoring an all-rows request
+                warn = (
+                    f"Materializing all {total:,} rows into memory defeats "
+                    "out-of-core sampling and may exhaust RAM — request fewer rows."
+                )
+                log.warning(warn)
+                notes.append(f"WARNING: {warn}")
             data = self.con.execute(f"SELECT * FROM {src}").df()
-            return SampleResult(
-                data=data, method="all", requested=count,
-                notes=[f"Requested {count} rows but source has {total}. Returning all rows."],
-            )
+            return SampleResult(data=data, method="all", requested=count, notes=notes)
 
         self._set_seed(seed)
 
@@ -432,9 +494,13 @@ class DuckDBEngine:
         self, src: str, count: int, strat_cols: list[str], seed: int | None
     ) -> SampleResult:
         cols_sql = ", ".join(_quote_ident(c) for c in strat_cols)
-        # pass 1: stratum sizes (small — one row per stratum)
+        # pass 1: stratum sizes (small — one row per stratum). ORDER BY pins
+        # the stratum order: DuckDB's GROUP BY row order is nondeterministic,
+        # and _proportional_allocation breaks remainder ties by position, so
+        # an unpinned order would make even seeded runs nondeterministic.
         group_df = self.con.execute(
-            f"SELECT {cols_sql}, count(*) AS _n FROM {src} GROUP BY {cols_sql}"
+            f"SELECT {cols_sql}, count(*) AS _n FROM {src} "
+            f"GROUP BY {cols_sql} ORDER BY {cols_sql} NULLS LAST"
         ).df()
         allocations = _proportional_allocation(group_df["_n"].to_numpy(), count)
         group_df["_alloc"] = allocations
@@ -505,6 +571,8 @@ def should_use_engine(source, row_threshold: int = LARGE_ROW_THRESHOLD) -> bool:
     ext = Path(source).suffix.lower()
     if ext == ".parquet":
         return True
+    if ext not in _NATIVE_READERS:
+        return False  # e.g. Excel: DuckDB cannot read it natively
     try:
         # rough gate on file size (bytes) as a proxy for row count
         return os.path.getsize(source) >= row_threshold * 20
