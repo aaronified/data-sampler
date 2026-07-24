@@ -4,7 +4,7 @@ import asyncio
 
 import pandas as pd
 import pytest
-from textual.widgets import DataTable, Input, Select, Static, Switch
+from textual.widgets import Button, DataTable, Input, Select, Static, Switch
 
 from data_sampler.tui.app import (
     ColumnsDataTable,
@@ -473,6 +473,31 @@ def test_undo_keeps_at_least_ten_steps(csv_file):
     run(go())
 
 
+def test_report_shows_reproduce_in_python_snippet(csv_file):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(160, 48)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            screen.configs["id"].kind = "sequential_id"
+            screen.configs["score"].skip_reduce = True
+            screen.query_one("#count", Input).value = "30"
+            screen.query_one("#seed", Input).value = "2"
+            screen.query_one("#reduce-mode", Select).value = "components"
+            screen.query_one("#reduce-value", Input).value = "1"
+            screen.action_run()
+            report = await wait_for_screen(app, pilot, ReportScreen)
+            content = str(report.query_one("#report-text", Static).content)
+            assert "REPRODUCE THIS IN PYTHON" in content
+            assert "ds.load_file(" in content
+            assert "ds.sample(" in content
+            assert "random_state=2" in content
+            assert "ds.anonymize(" in content and "sequential_id" in content
+            assert "ds.reduce_columns(" in content and "n_components=1" in content
+            assert "ds.save_output(" in content
+
+    run(go())
+
+
 def test_deselected_row_is_not_bulk_edited(csv_file):
     """Regression: a row toggled OFF the selection must not receive bulk edits,
     even when it is still the cursor row."""
@@ -592,6 +617,101 @@ def test_save_report_as_text(csv_file, tmp_path):
             assert "score" in content
             status = str(report.query_one("#save-status", Static).content)
             assert "saved" in status
+
+    run(go())
+
+
+def test_names_gender_ethnicity_controls(csv_file):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(180, 55)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            screen.selected = "name"
+            screen.configs["name"].kind = "names"
+            screen._sync_config_panel("name")
+            await pilot.pause()
+            screen.query_one("#opt-names-gender", Select).value = "female"
+            screen.query_one("#opt-names-ethnicity", Select).value = "chinese"
+            await wait_until(
+                pilot,
+                lambda: screen.configs["name"].gender == "female"
+                and screen.configs["name"].ethnicity == "chinese",
+                "gender + ethnicity applied",
+            )
+            anon = build_anonymizer(screen.configs["name"])
+            assert anon.gender == "female" and anon.ethnicity == "chinese"
+
+    run(go())
+
+
+def test_names_from_column_sets_column_and_map(csv_file):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(180, 55)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            screen.selected = "name"
+            screen.configs["name"].kind = "names"
+            screen._sync_config_panel("name")
+            await pilot.pause()
+            screen.query_one("#opt-names-gender", Select).value = "column"
+            await wait_until(
+                pilot, lambda: screen.configs["name"].gender == "column",
+                "gender switched to column mode",
+            )
+            # the column picker row becomes visible
+            assert not screen.query_one("#opt-names-gender-col-row").has_class("hidden")
+            screen.query_one("#opt-names-gender-col", Select).value = "region"
+            await wait_until(
+                pilot, lambda: screen.configs["name"].gender_column == "region",
+                "gender column selected",
+            )
+            anon = build_anonymizer(screen.configs["name"])
+            assert anon.gender_column == "region"
+
+    run(go())
+
+
+def test_mapping_modal_writes_map(csv_file):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(180, 55)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            screen.selected = "name"
+            cfg = screen.configs["name"]
+            cfg.kind = "names"
+            cfg.gender = "column"
+            cfg.gender_column = "tier"  # gold/silver/bronze — no auto gender
+            screen._open_mapping("gender")
+            from data_sampler.tui.app import MappingScreen
+
+            modal = await wait_for_screen(app, pilot, MappingScreen)
+            # map the first distinct value to "female"
+            modal.query_one("#map-0", Select).value = "female"
+            await pilot.pause()
+            modal.query_one("#map-apply", Button).press()
+            await wait_until(
+                pilot, lambda: "female" in cfg.gender_map.values(),
+                "mapping written back",
+            )
+
+    run(go())
+
+
+def test_home_screen_export_names_library(tmp_path):
+    async def go():
+        app = DataSamplerApp()
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, FileScreen)
+            target = tmp_path / "mynames.py"
+            screen.query_one("#names-path", Input).value = str(target)
+            screen._names_lib_action("export")
+            await pilot.pause()
+            assert target.exists()
+            assert "FIRST_NAMES" in target.read_text(encoding="utf-8")
+            status = str(screen.query_one("#names-lib-status", Static).content)
+            assert "exported" in status
 
     run(go())
 

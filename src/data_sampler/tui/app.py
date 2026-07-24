@@ -25,7 +25,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
 from textual.message import Message
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     ContentSwitcher,
@@ -39,10 +39,10 @@ from textual.widgets import (
     Switch,
 )
 
-from .. import __version__
+from .. import __version__, _names
 from .._logging import get_logger, redirect_to_file
-from ..anonymize import make_anonymizer
-from ..io import load_file, save_output
+from ..anonymize import make_anonymizer, suggest_ethnicity_mapping, suggest_gender_mapping
+from ..io import is_url as io_is_url, load_file, save_output
 from ..reduce import reduce_columns
 from ..report import format_reduction_report, format_stratification_report
 from ..sampling import sample
@@ -60,6 +60,11 @@ ORANGE = "#ff875f"
 RED = "#ff5f5f"
 DIM = "#5f6b85"
 FG = "#c8d3f5"
+# input chrome: a muted resting outline that brightens to CYAN on focus, over a
+# panel-distinct fill — the btop-style "quiet until focused" treatment
+BORDER = "#2b3550"
+INPUT_BG = "#121826"
+INPUT_BG_FOCUS = "#16202e"
 
 KIND_COLORS = {
     "numeric": CYAN,
@@ -99,6 +104,34 @@ REDUCE_CHOICES = [
     ("variance ≥ R", "variance"),
 ]
 
+# names anonymizer: gender + ethnicity for the replacement names
+GENDER_CHOICES = [
+    ("mixed (any)", "mixed"),
+    ("male", "male"),
+    ("female", "female"),
+    ("third gender", "third"),
+    ("not disclosed", "undisclosed"),
+    ("from a column…", "column"),
+]
+
+
+def _pretty_ethnicity(key: str) -> str:
+    return key.replace("_", " ").title()
+
+
+ETHNICITY_CHOICES = (
+    [("all / mixed", "all")]
+    + [(_pretty_ethnicity(e), e) for e in _names.ETHNICITIES]
+    + [("from a column…", "column")]
+)
+
+# gender targets offered when manually mapping a gender column's values
+GENDER_MAP_TARGETS = [
+    ("male", "male"), ("female", "female"), ("third gender", "third"),
+    ("not disclosed", "undisclosed"),
+]
+ETHNICITY_MAP_TARGETS = [(_pretty_ethnicity(e), e) for e in _names.ETHNICITIES]
+
 
 @dataclass
 class ColumnConfig:
@@ -108,13 +141,44 @@ class ColumnConfig:
     options: dict[str, str] = field(default_factory=dict)
     skip_strat: bool = False
     skip_reduce: bool = False
+    # names anonymizer only: "mixed" | male | female | third | undisclosed | "column"
+    gender: str = "mixed"
+    # names anonymizer only: "all" | <ethnicity> | "column"
+    ethnicity: str = "all"
+    gender_column: str = ""     # used when gender == "column"
+    ethnicity_column: str = ""  # used when ethnicity == "column"
+    randomize_gender: bool = False
+    gender_map: dict[str, str] = field(default_factory=dict)     # raw value -> gender
+    ethnicity_map: dict[str, str] = field(default_factory=dict)  # raw value -> ethnicity
+
+
+def _names_kwargs(cfg: ColumnConfig) -> dict:
+    """Build the ``NameAnonymizer`` kwargs a names config maps to — shared by
+    :func:`build_anonymizer` (instance) and :func:`anon_api_kwargs` (snippet),
+    so the reproduce-in-Python code always matches what actually ran."""
+    kw: dict = {"style": cfg.options.get("style") or "first_last"}
+    if cfg.gender == "column" and cfg.gender_column:
+        kw["gender_column"] = cfg.gender_column
+        if cfg.gender_map:
+            kw["gender_map"] = dict(cfg.gender_map)
+        if cfg.randomize_gender:
+            kw["randomize_gender"] = True
+    elif cfg.gender not in ("mixed", "column"):
+        kw["gender"] = cfg.gender
+    if cfg.ethnicity == "column" and cfg.ethnicity_column:
+        kw["ethnicity_column"] = cfg.ethnicity_column
+        if cfg.ethnicity_map:
+            kw["ethnicity_map"] = dict(cfg.ethnicity_map)
+    elif cfg.ethnicity not in ("all", "column"):
+        kw["ethnicity"] = cfg.ethnicity
+    return kw
 
 
 def build_anonymizer(cfg: ColumnConfig):
     """Turn a ColumnConfig's raw option strings into an anonymizer instance."""
     o = cfg.options
     if cfg.kind == "names":
-        return make_anonymizer("names", style=o.get("style") or "first_last")
+        return make_anonymizer("names", **_names_kwargs(cfg))
     if cfg.kind == "sequential_id":
         return make_anonymizer(
             "sequential_id",
@@ -143,6 +207,40 @@ def build_anonymizer(cfg: ColumnConfig):
     if cfg.kind == "hex":
         return make_anonymizer("hex", length=int(o.get("length") or 8))
     raise ValueError(f"No anonymizer configured ({cfg.kind!r})")
+
+
+def anon_api_kwargs(cfg: ColumnConfig) -> tuple[str, dict]:
+    """The ``(kind, kwargs)`` a column's config maps to in the public API —
+    mirrors :func:`build_anonymizer` so the report's copy-paste snippet
+    reproduces the run exactly (e.g. ``pct`` 20 → ``0.2``)."""
+    o = cfg.options
+    if cfg.kind == "names":
+        return "names", _names_kwargs(cfg)
+    if cfg.kind == "sequential_id":
+        kw: dict = {"start": int(o.get("start") or 1), "interval": int(o.get("interval") or 1)}
+        if (o.get("prefix") or ""):
+            kw["prefix"] = o["prefix"]
+        if int(o.get("width") or 0):
+            kw["width"] = int(o["width"])
+        return "sequential_id", kw
+    if cfg.kind == "numeric_jitter":
+        kw = {"pct": float(o.get("pct") or 20) / 100.0}
+        if (o.get("round_to") or "").strip():
+            kw["round_to"] = int(o["round_to"])
+        return "numeric_jitter", kw
+    if cfg.kind == "datetime_jitter":
+        return "datetime_jitter", {
+            "max_delta": (o.get("max_delta") or "7D").strip(),
+            "unit": (o.get("unit") or "s").strip(),
+        }
+    if cfg.kind == "random_string":
+        kw = {"length": int(o.get("length") or 8)}
+        if (o.get("prefix") or ""):
+            kw["prefix"] = o["prefix"]
+        return "random_string", kw
+    if cfg.kind == "hex":
+        return "hex", {"length": int(o.get("length") or 8)}
+    return cfg.kind, {}
 
 
 def anon_label(cfg: ColumnConfig) -> str:
@@ -198,16 +296,31 @@ class FileScreen(Screen):
             id="titlebar",
         )
         with Horizontal(id="file-main"):
-            with Vertical(id="file-form"):
-                yield Label("file path", classes="field-label")
+            with VerticalScroll(id="file-form"):
+                yield Label("file path or URL", classes="field-label")
                 yield Input(
-                    placeholder="path to .csv / .tsv / .json / .xlsx / .parquet",
+                    placeholder="local path or http(s) URL — .csv / .tsv / .json / .xlsx / .parquet",
                     id="path",
                 )
                 yield Label("excel sheet (blank = first)", classes="field-label")
                 yield Input(placeholder="sheet name", id="sheet")
                 yield Button("▶ load", id="load", variant="success")
                 yield Static("", id="file-status")
+                yield Label("names library (for the names anonymizer)", classes="field-label")
+                yield Static(
+                    "swap in your own names: export the current library, edit "
+                    "it, then load it back (this session) — or set it permanently.",
+                    id="names-lib-note",
+                )
+                yield Input(
+                    placeholder="path to a custom names .py (load / export target)",
+                    id="names-path",
+                )
+                with Horizontal(id="names-lib-row"):
+                    yield Button("⬇ export sample", id="export-names", classes="mini-btn")
+                    yield Button("⬆ load custom", id="load-names", classes="mini-btn")
+                    yield Button("install permanently", id="install-names", classes="mini-btn")
+                yield Static("", id="names-lib-status")
             with Vertical(id="file-browser"):
                 yield Button("⟳ refresh", id="refresh-browser", classes="mini-btn")
                 yield DirectoryTree(str(Path.cwd()), id="browser")
@@ -235,6 +348,40 @@ class FileScreen(Screen):
             self.action_load()
         elif event.button.id == "refresh-browser":
             self.action_refresh_browser()
+        elif event.button.id == "export-names":
+            self._names_lib_action("export")
+        elif event.button.id == "load-names":
+            self._names_lib_action("load")
+        elif event.button.id == "install-names":
+            self._names_lib_action("install")
+
+    def _names_lib_action(self, which: str) -> None:
+        """Export / load / install a custom names library from the home screen."""
+        status = self.query_one("#names-lib-status", Static)
+        raw = self.query_one("#names-path", Input).value.strip().strip('"').strip("'")
+        try:
+            if which == "export":
+                target = raw or "data_sampler_names.py"
+                _names.export_library(target)
+                status.update(Text(f"✓ exported current library → {target}", style=GREEN))
+            elif which == "load":
+                if not raw or not os.path.isfile(raw):
+                    status.update(Text("enter the path to a custom names .py to load", style=YELLOW))
+                    return
+                _names.load_library(path=raw)
+                status.update(Text(
+                    f"✓ loaded custom library ({len(_names.ETHNICITIES)} ethnicities, "
+                    "this session)", style=GREEN,
+                ))
+            else:  # install permanently into the package
+                if not raw or not os.path.isfile(raw):
+                    status.update(Text("enter the path to a custom names .py to install", style=YELLOW))
+                    return
+                target = _names.install_library(raw)
+                status.update(Text(f"✓ installed into the package: {target}", style=GREEN))
+        except Exception as exc:  # surfaced, never crash
+            log.exception("names library action failed")
+            status.update(Text(f"✗ {type(exc).__name__}: {exc}", style=RED))
 
     def action_refresh_browser(self) -> None:
         """Re-scan the working directory so files created since launch appear."""
@@ -248,9 +395,10 @@ class FileScreen(Screen):
         sheet = self.query_one("#sheet", Input).value.strip() or None
         status = self.query_one("#file-status", Static)
         if not path:
-            status.update(Text("enter a file path or pick one from the browser", style=YELLOW))
+            status.update(Text("enter a file path or URL, or pick one from the browser", style=YELLOW))
             return
-        if not os.path.isfile(path):
+        # a local path must exist; an http(s)/s3 URL is passed straight through
+        if not io_is_url(path) and not os.path.isfile(path):
             status.update(Text(f"file not found: {path}", style=RED))
             return
         status.update(Text("loading…", style=CYAN))
@@ -289,6 +437,62 @@ class FileScreen(Screen):
         app.sheet = sheet
         app.column_stats = stats
         app.push_screen(ColumnsScreen())
+
+
+class MappingScreen(ModalScreen):
+    """Modal to map a column's distinct values to gender / ethnicity groups.
+
+    Prefilled from auto-detection (:func:`suggest_gender_mapping` /
+    :func:`suggest_ethnicity_mapping`); every value stays editable, so it is
+    the manual fallback / override. Dismisses with a ``{raw value: target}``
+    dict (unmapped values omitted), or ``None`` on cancel.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "cancel")]
+
+    def __init__(self, title: str, values: list, targets: list, current: dict):
+        super().__init__()
+        self._title = title
+        self._values = list(values)
+        self._targets = targets
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="map-dialog"):
+            yield Static(self._title, id="map-title")
+            yield Static(
+                "auto-detected below — override any row (blank = fall back)",
+                id="map-help",
+            )
+            options = [("(skip)", "")] + list(self._targets)
+            with VerticalScroll(id="map-list"):
+                for i, val in enumerate(self._values):
+                    with Horizontal(classes="map-row"):
+                        yield Label(str(val)[:22], classes="map-val")
+                        yield Select(
+                            options, value=self._current.get(val) or "",
+                            allow_blank=False, id=f"map-{i}",
+                        )
+            with Horizontal(id="map-actions"):
+                yield Button("cancel (esc)", id="map-cancel")
+                yield Button("apply", id="map-apply", variant="success")
+
+    def on_mount(self) -> None:
+        self.query_one("#map-dialog").border_title = "map values"
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "map-cancel":
+            self.action_cancel()
+        elif event.button.id == "map-apply":
+            mapping: dict = {}
+            for i, val in enumerate(self._values):
+                value = self.query_one(f"#map-{i}", Select).value
+                if value:  # "" == the "(skip)" option → leave unmapped
+                    mapping[val] = value
+            self.dismiss(mapping)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class ColumnsDataTable(DataTable):
@@ -374,6 +578,10 @@ class ColumnsScreen(Screen):
         app: DataSamplerApp = self.app  # type: ignore[assignment]
         n_rows = len(app.df) if app.df is not None else 0
         n_cols = len(app.df.columns) if app.df is not None else 0
+        # column choices for the "gender/ethnicity from a column" pickers
+        col_choices = [
+            (str(c), str(c)) for c in (app.df.columns if app.df is not None else [])
+        ]
         yield Static(
             f" ▓▒░ DATA SAMPLER ░▒▓  {Path(app.source_path or '?').name}"
             f" · {n_rows:,} rows × {n_cols} columns",
@@ -409,6 +617,31 @@ class ColumnsScreen(Screen):
                                 allow_blank=False,
                                 id="opt-names-style",
                             )
+                            yield Label("gender", classes="field-label")
+                            yield Select(
+                                GENDER_CHOICES, value="mixed", allow_blank=False,
+                                id="opt-names-gender",
+                            )
+                            with Vertical(id="opt-names-gender-col-row", classes="col-map hidden"):
+                                yield Select(
+                                    [("(no column)", "")] + col_choices, value="",
+                                    allow_blank=False, id="opt-names-gender-col",
+                                )
+                                with Horizontal(classes="optrow"):
+                                    yield Switch(value=False, id="opt-names-gender-random")
+                                    yield Label("randomize gender", classes="opt-label-wide")
+                                yield Button("map values…", id="btn-gender-map", classes="mini-btn")
+                            yield Label("ethnicity", classes="field-label")
+                            yield Select(
+                                ETHNICITY_CHOICES, value="all", allow_blank=False,
+                                id="opt-names-ethnicity",
+                            )
+                            with Vertical(id="opt-names-eth-col-row", classes="col-map hidden"):
+                                yield Select(
+                                    [("(no column)", "")] + col_choices, value="",
+                                    allow_blank=False, id="opt-names-eth-col",
+                                )
+                                yield Button("map values…", id="btn-eth-map", classes="mini-btn")
                         with Vertical(id="opts-sequential_id"):
                             with Horizontal(classes="optrow"):
                                 yield Label("start", classes="opt-label")
@@ -649,6 +882,23 @@ class ColumnsScreen(Screen):
             skip_reduce = self.query_one("#skip-reduce", Switch)
             if skip_reduce.value != cfg.skip_reduce:
                 skip_reduce.value = cfg.skip_reduce
+            # names gender / ethnicity controls
+            gsel = self.query_one("#opt-names-gender", Select)
+            if gsel.value != cfg.gender:
+                gsel.value = cfg.gender
+            esel = self.query_one("#opt-names-ethnicity", Select)
+            if esel.value != cfg.ethnicity:
+                esel.value = cfg.ethnicity
+            gcol = self.query_one("#opt-names-gender-col", Select)
+            if gcol.value != cfg.gender_column:
+                gcol.value = cfg.gender_column  # "" == the "(no column)" option
+            ecol = self.query_one("#opt-names-eth-col", Select)
+            if ecol.value != cfg.ethnicity_column:
+                ecol.value = cfg.ethnicity_column
+            grand = self.query_one("#opt-names-gender-random", Switch)
+            if grand.value != cfg.randomize_gender:
+                grand.value = cfg.randomize_gender
+            self._update_names_visibility(cfg)
         finally:
             self._syncing = False
 
@@ -807,8 +1057,57 @@ class ColumnsScreen(Screen):
                 if self.configs[c].kind == "names":
                     self.configs[c].options["style"] = style
                     self._refresh_row(c)
+        elif event.select.id == "opt-names-gender":
+            self._apply_names_attr("gender", str(event.value))
+            self._update_names_visibility(sel)
+        elif event.select.id == "opt-names-ethnicity":
+            self._apply_names_attr("ethnicity", str(event.value))
+            self._update_names_visibility(sel)
+        elif event.select.id == "opt-names-gender-col":
+            self._apply_names_column("gender", str(event.value))
+        elif event.select.id == "opt-names-eth-col":
+            self._apply_names_column("ethnicity", str(event.value))
+
+    def _apply_names_attr(self, attr: str, value: str) -> None:
+        """Set a names attribute (gender/ethnicity) on every names target."""
+        if getattr(self.configs[self.selected], attr) == value:
+            return
+        self._checkpoint()
+        for c in self._targets():
+            if self.configs[c].kind == "names":
+                setattr(self.configs[c], attr, value)
+
+    def _apply_names_column(self, which: str, column: str) -> None:
+        """Set (or clear, when ``column`` is "") the gender/ethnicity source
+        column, auto-detecting its value mapping."""
+        col_attr = "gender_column" if which == "gender" else "ethnicity_column"
+        map_attr = "gender_map" if which == "gender" else "ethnicity_map"
+        if getattr(self.configs[self.selected], col_attr) == column:
+            return  # echo / no-op for the shown row
+        auto: dict = {}
+        if column and self.app.df is not None and column in self.app.df.columns:
+            distinct = list(self.app.df[column].dropna().unique())
+            suggest = suggest_gender_mapping if which == "gender" else suggest_ethnicity_mapping
+            auto = {k: v for k, v in suggest(distinct).items() if v}
+        self._checkpoint()
+        for c in self._targets():
+            if self.configs[c].kind == "names":
+                setattr(self.configs[c], col_attr, column)
+                setattr(self.configs[c], map_attr, dict(auto))
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "opt-names-gender-random":
+            if self._syncing or self.selected is None:
+                return
+            if self._is_stale(event.value, event.switch.value):
+                return
+            if self.configs[self.selected].randomize_gender == event.value:
+                return
+            self._checkpoint()
+            for c in self._targets():
+                if self.configs[c].kind == "names":
+                    self.configs[c].randomize_gender = event.value
+            return
         if event.switch.id not in ("skip-strat", "skip-reduce"):
             return  # ignore the run bar's #random switch
         if self._syncing or self.selected is None:
@@ -848,9 +1147,55 @@ class ColumnsScreen(Screen):
                 cfg.options[opt] = event.value
                 self._refresh_row(c)
 
+    def _update_names_visibility(self, cfg: ColumnConfig) -> None:
+        """Show the gender/ethnicity column pickers only in 'from a column' mode."""
+        self.query_one("#opt-names-gender-col-row").set_class(
+            cfg.gender != "column", "hidden"
+        )
+        self.query_one("#opt-names-eth-col-row").set_class(
+            cfg.ethnicity != "column", "hidden"
+        )
+
+    def _open_mapping(self, which: str) -> None:
+        """Open the value→group mapping modal for the gender/ethnicity column."""
+        app = self.app  # type: ignore[assignment]
+        if self.selected is None or app.df is None:
+            return
+        cfg = self.configs[self.selected]
+        col = cfg.gender_column if which == "gender" else cfg.ethnicity_column
+        if not col or col not in app.df.columns:
+            self.notify(f"pick a {which} column first", severity="warning")
+            return
+        distinct = list(app.df[col].dropna().unique())
+        if which == "gender":
+            targets = GENDER_MAP_TARGETS
+            current = {**suggest_gender_mapping(distinct), **cfg.gender_map}
+            attr = "gender_map"
+        else:
+            targets = ETHNICITY_MAP_TARGETS
+            current = {**suggest_ethnicity_mapping(distinct), **cfg.ethnicity_map}
+            attr = "ethnicity_map"
+
+        def done(mapping: dict | None) -> None:
+            if mapping is None:
+                return
+            self._checkpoint()
+            for c in self._targets():
+                if self.configs[c].kind == "names":
+                    setattr(self.configs[c], attr, dict(mapping))
+            self.notify(f"{which} mapping: {len(mapping)} value(s) set", timeout=3)
+
+        app.push_screen(
+            MappingScreen(f"map '{col}' → {which}", distinct, targets, current), done
+        )
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "run":
             self.action_run()
+        elif event.button.id == "btn-gender-map":
+            self._open_mapping("gender")
+        elif event.button.id == "btn-eth-map":
+            self._open_mapping("ethnicity")
 
     def action_toggle_skip(self) -> None:
         self._bulk_toggle("skip_strat")
@@ -973,6 +1318,47 @@ class ColumnsScreen(Screen):
             exclusive=True,
         )
 
+    def _build_snippet(
+        self, *, count, use_random, exclude, seed, outdir,
+        reduce_kwargs, reduce_exclude, source_path, tag,
+    ) -> str:
+        """The Python that reproduces this run — shown on the report screen so
+        the TUI is a launchpad for the scriptable API, not a dead end."""
+        src = Path(source_path).name if source_path else "data.csv"
+        out: list[str] = ["import data_sampler as ds", "", f"df = ds.load_file({src!r})"]
+
+        args = ["df", str(count)]
+        if use_random:
+            args.append("use_random=True")
+        if exclude:
+            args.append(f"exclude_columns={exclude!r}")
+        if seed is not None:
+            args.append(f"random_state={seed}")
+        out.append(f"result = ds.sample({', '.join(args)})")
+        out.append("data = result.data")
+
+        anon = [(c, cfg) for c, cfg in self.configs.items() if cfg.kind != "none"]
+        if anon:
+            out.append("data = ds.anonymize(data, {")
+            for col, cfg in anon:
+                kind, kwargs = anon_api_kwargs(cfg)
+                spec = f"({kind!r}, {kwargs!r})" if kwargs else f"{kind!r}"
+                out.append(f"    {col!r}: {spec},")
+            out.append(f"}}, seed={seed!r})")
+
+        if reduce_kwargs:
+            rargs = ", ".join(f"{k}={v!r}" for k, v in reduce_kwargs.items())
+            if reduce_exclude:
+                rargs += f", exclude={reduce_exclude!r}"
+            if seed is not None:
+                rargs += f", seed={seed}"
+            out.append(f"red = ds.reduce_columns(data, {rargs})")
+            out.append("data = red.data")
+
+        outdir_arg = f", output_folder={outdir!r}" if outdir else ""
+        out.append(f"ds.save_output(data, {src!r}, tag={tag!r}{outdir_arg})")
+        return "\n".join(out)
+
     def _do_run(
         self, count, use_random, exclude, spec, seed, outdir,
         reduce_kwargs=None, reduce_exclude=(),
@@ -1010,7 +1396,23 @@ class ColumnsScreen(Screen):
             )
             out_path = save_output(data, app.source_path, tag, output_folder=outdir)
 
-            lines = list(result.notes)
+            # lead with the reproduce-in-Python snippet so it's the first thing
+            # on the report (and at the top of the saved .txt), not below a long
+            # stratification report
+            snippet = self._build_snippet(
+                count=count, use_random=use_random, exclude=exclude, seed=seed,
+                outdir=outdir, reduce_kwargs=reduce_kwargs,
+                reduce_exclude=reduce_exclude, source_path=app.source_path, tag=tag,
+            )
+            lines = [
+                "╔═════════════════════════════════════════════════════════════════════╗",
+                "║                       REPRODUCE THIS IN PYTHON                      ║",
+                "╚═════════════════════════════════════════════════════════════════════╝",
+                "",
+                snippet,
+                "",
+            ]
+            lines += list(result.notes)
             if exclude:
                 lines.append(f"Columns excluded from stratification: {', '.join(exclude)}")
             report = format_stratification_report(app.df, result)
@@ -1055,7 +1457,7 @@ class ReportScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "back", "back to columns"),
-        Binding("ctrl+s", "save_text", "save report .txt"),
+        Binding("ctrl+s", "save_text", "save report + histograms"),
         Binding("n", "new_file", "new file"),
     ]
 
@@ -1076,7 +1478,7 @@ class ReportScreen(Screen):
                 yield Static(self._build_histograms(), id="hist-text")
         with Horizontal(id="report-actions"):
             yield Button("◀ back (esc)", id="back")
-            yield Button("💾 save .txt (ctrl+s)", id="save-text", variant="success")
+            yield Button("💾 save report + histograms (ctrl+s)", id="save-text", variant="success")
             yield Button("new file (n)", id="new-file", variant="primary")
             yield Static("", id="save-status")
         yield Footer()
@@ -1149,11 +1551,16 @@ class ReportScreen(Screen):
             self.action_new_file()
 
     def action_save_text(self) -> None:
-        """Write the report and column histograms to a .txt beside the sample."""
+        """Write the report AND the column histograms to a .txt beside the sample."""
         try:
             out = Path(self._out_path)
             txt_path = out.with_name(f"{out.stem}_report.txt")
-            content = self._report + "\n\n" + self._histograms_text() + "\n"
+            content = (
+                self._report
+                + "\n\n"
+                + self._histograms_text()  # the "COLUMN DISTRIBUTIONS" section
+                + "\n"
+            )
             txt_path.write_text(content, encoding="utf-8")
         except Exception as exc:  # surfaced to the user, never crash the TUI
             log.exception("save report failed")
@@ -1163,9 +1570,9 @@ class ReportScreen(Screen):
             self.notify(f"save failed: {exc}", severity="error", timeout=8)
             return
         self.query_one("#save-status", Static).update(
-            Text(f"✓ saved {txt_path.name}", style=GREEN)
+            Text(f"✓ saved report + histograms → {txt_path.name}", style=GREEN)
         )
-        self.notify(f"saved report to {txt_path}", timeout=5)
+        self.notify(f"saved report + histograms to {txt_path}", timeout=5)
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -1218,6 +1625,10 @@ class DataSamplerApp(App):
     #refresh-browser {{ width: auto; height: 3; margin: 0 1; }}
     #file-status {{ margin-top: 1; }}
     #load {{ margin-top: 1; }}
+    #names-lib-note {{ color: {DIM}; margin-top: 1; }}
+    #names-lib-row {{ height: 3; margin-top: 1; }}
+    #names-lib-row Button {{ margin-right: 1; }}
+    #names-lib-status {{ margin-top: 1; }}
     .field-label {{ color: {DIM}; margin-top: 1; }}
 
     /* columns screen */
@@ -1257,6 +1668,11 @@ class DataSamplerApp(App):
     #skip-label {{ margin-top: 1; color: {FG}; }}
     #reduce-skip-row {{ height: 3; }}
     #reduce-skip-label {{ margin-top: 1; color: {FG}; }}
+    .hidden {{ display: none; }}
+    .col-map {{ height: auto; padding: 0 0 0 2; }}
+    .col-map > Button {{ margin: 0; }}
+    .opt-label-wide {{ width: auto; margin-top: 1; margin-left: 1; color: {FG}; }}
+    .mini-btn {{ width: auto; height: 3; }}
 
     /* run bar */
     #runbar {{
@@ -1270,7 +1686,7 @@ class DataSamplerApp(App):
     .run-input-l {{ width: 1fr; }}
     #random {{ margin-top: 0; }}
     #reduce-mode {{ width: 20; }}
-    #reduce-value {{ width: 8; }}
+    #reduce-value {{ width: 10; }}
     #run {{ margin-left: 2; }}
 
     /* report screen */
@@ -1291,15 +1707,88 @@ class DataSamplerApp(App):
     #report-actions Button {{ margin-right: 2; }}
     #save-status {{ margin-top: 1; width: 1fr; }}
 
+    /* value-mapping modal */
+    MappingScreen {{ align: center middle; background: #0b0e14 70%; }}
+    #map-dialog {{
+        width: 64; height: 80%;
+        background: #10141c;
+        border: round {MAGENTA};
+        border-title-color: {MAGENTA};
+        padding: 1 2;
+    }}
+    #map-title {{ color: {FG}; text-style: bold; }}
+    #map-help {{ color: {DIM}; margin-bottom: 1; }}
+    #map-list {{ height: 1fr; }}
+    .map-row {{ height: 3; }}
+    .map-val {{ width: 24; margin-top: 1; color: {FG}; }}
+    #map-actions {{ height: 3; margin-top: 1; }}
+    #map-actions Button {{ margin-right: 2; }}
+
+    /* inputs / selects / switches — rounded, quiet at rest, cyan on focus
+       (btop-style chrome that matches the panels' round borders) */
     Input {{
-        background: #151a24;
+        background: {INPUT_BG};
+        border: round {BORDER};
+        padding: 0 1;
+        height: 3;
     }}
     Input:focus {{
-        border: tall {CYAN};
+        border: round {CYAN};
+        background: {INPUT_BG_FOCUS};
     }}
-    Select {{
-        background: #151a24;
+    Input.-invalid {{ border: round {RED}; }}
+    Input.-invalid:focus {{ border: round {RED}; }}
+    Input > .input--placeholder {{ color: {DIM}; text-style: italic; }}
+    Input > .input--cursor {{ background: {CYAN}; color: #0b0e14; }}
+
+    Select {{ height: 3; }}
+    SelectCurrent {{
+        background: {INPUT_BG};
+        border: round {BORDER};
+        padding: 0 1;
     }}
+    Select:focus > SelectCurrent {{ border: round {CYAN}; }}
+    Select.-expanded > SelectCurrent {{ border: round {CYAN}; }}
+    SelectCurrent .arrow {{ color: {CYAN}; }}
+    SelectOverlay {{
+        background: {INPUT_BG};
+        border: round {CYAN};
+    }}
+    SelectOverlay > .option-list--option-highlighted {{
+        background: {INPUT_BG_FOCUS};
+        color: {CYAN};
+        text-style: bold;
+    }}
+
+    Switch {{
+        background: {INPUT_BG};
+        border: round {BORDER};
+        padding: 0 1;
+    }}
+    Switch:focus {{ border: round {CYAN}; }}
+    Switch > .switch--slider {{ color: {DIM}; background: #0b0e14; }}
+    Switch.-on > .switch--slider {{ color: {GREEN}; }}
+
+    /* buttons — outlined, no solid fill (btop-style): a rounded accent border
+       + bold accent text over the transparent panel, brightening on hover */
+    Button {{
+        height: 3;
+        min-width: 10;
+        background: transparent;
+        color: {FG};
+        text-style: bold;
+        border: round {DIM};
+        border-top: round {DIM};
+        border-bottom: round {DIM};
+    }}
+    Button:hover {{ background: transparent; color: {CYAN}; border: round {CYAN}; }}
+    Button:focus {{ background: transparent; border: round {CYAN}; text-style: bold; }}
+    Button.-active {{ background: transparent; tint: {CYAN} 12%; }}
+    Button.-success {{ color: {GREEN}; border: round {GREEN}; background: transparent; }}
+    Button.-success:hover {{ color: {GREEN}; border: round {GREEN}; background: transparent; }}
+    Button.-primary {{ color: {CYAN}; border: round {CYAN}; background: transparent; }}
+    Button.-primary:hover {{ color: {CYAN}; border: round {CYAN}; background: transparent; }}
+
     DataTable > .datatable--header {{
         color: {CYAN};
         text-style: bold;

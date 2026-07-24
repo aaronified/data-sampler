@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 
 SUPPORTED_EXTENSIONS = (".csv", ".tsv", ".json", ".xlsx", ".xls", ".parquet")
 
 
+def is_url(filepath: str | Path) -> bool:
+    """Whether ``filepath`` is an ``http(s)`` (or ``s3``) URL, not a local path."""
+    return str(filepath).lower().startswith(("http://", "https://", "s3://"))
+
+
 def load_file(filepath: str | Path, sheet: str | None = None) -> pd.DataFrame:
     """Load a data file into a DataFrame.
 
-    Supports CSV, TSV, JSON, Excel (.xlsx/.xls) and Parquet. For Excel files,
-    ``sheet`` selects the sheet by name (default: first sheet).
+    Supports CSV, TSV, JSON, Excel (.xlsx/.xls) and Parquet, from a local path
+    **or an http(s) URL** (e.g. a GitHub raw link) — pandas streams the URL, so
+    it downloads the whole file into memory; for very large remote data use the
+    out-of-core DuckDB engine instead. For Excel files, ``sheet`` selects the
+    sheet by name (default: first sheet). The file type is taken from the
+    extension (of the URL path, ignoring any query string).
     """
-    ext = Path(filepath).suffix.lower()
+    # derive the extension from the URL path (not the query) for remote sources
+    ext_source = urlparse(str(filepath)).path if is_url(filepath) else str(filepath)
+    ext = Path(ext_source).suffix.lower()
     readers = {
         ".csv": lambda: pd.read_csv(filepath),
         ".tsv": lambda: pd.read_csv(filepath, sep="\t"),
@@ -50,11 +62,19 @@ def save_output(
     """Save ``df`` next to ``source_path`` (or into ``output_folder``).
 
     The output keeps the source file's format and is named
-    ``{stem}_{tag}{ext}`` (e.g. ``data_sample_500.csv``).
+    ``{stem}_{tag}{ext}`` (e.g. ``data_sample_500.csv``). When ``source_path``
+    is a URL the name comes from the URL's path and, without an explicit
+    ``output_folder``, the file is written to the current directory (a URL has
+    no meaningful local parent).
     """
-    p = Path(source_path)
+    if is_url(source_path):
+        p = Path(urlparse(str(source_path)).path)
+        default_dir = Path.cwd()
+    else:
+        p = Path(source_path)
+        default_dir = p.parent
     out_name = f"{p.stem}_{tag}{p.suffix}"
-    out_dir = Path(output_folder) if output_folder else p.parent
+    out_dir = Path(output_folder) if output_folder else default_dir
     out_path = out_dir / out_name
     ext = p.suffix.lower()
 

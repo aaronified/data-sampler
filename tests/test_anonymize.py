@@ -82,8 +82,8 @@ def test_names_come_from_library():
     out = NameAnonymizer().transform(series, random.Random(0))
     for full in out:
         first, last = full.split(" ")
-        assert first in _names.FIRST_NAMES
-        assert last in _names.LAST_NAMES
+        assert first in _names.ALL_FIRST
+        assert last in _names.ALL_LAST
 
 
 def test_name_styles():
@@ -98,10 +98,11 @@ def test_name_styles():
 
 
 def test_names_unique_even_beyond_style_capacity():
-    # 300 uniques > capacity("first")=200 → auto-escalates, all still unique
-    series = pd.Series([f"v{i}" for i in range(300)])
+    # more uniques than the "first" pool → auto-escalation + numbered fallback
+    # keep every replacement distinct
+    series = pd.Series([f"v{i}" for i in range(len(_names.ALL_FIRST) + 50)])
     out = NameAnonymizer("first").transform(series, random.Random(0))
-    assert out.nunique() == 300
+    assert out.nunique() == len(series)
 
 
 def test_names_huge_column_stays_unique():

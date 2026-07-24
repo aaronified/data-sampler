@@ -1,5 +1,44 @@
 # Changelog
 
+## v3.5.0 — 2026-07-24
+
+- **Names anonymizer is now gender- and ethnicity-aware.** The bundled library
+  (`_names.py`) is regrouped into real, hand-checked names keyed by
+  `<ethnicity>_<gender>` across **33 ethnic groups** (multiple Indian
+  regions/cultures, Chinese, Japanese, Korean, Vietnamese, Anglo, Italian,
+  French, German, Russian, Polish, Scandinavian, Greek, Turkish, Persian,
+  Arab-Levantine, Sudanese, Algerian, Moroccan, Ethiopian, Rwandan, Yoruba,
+  Igbo, Ghanaian-Akan, Hispanic, Brazilian, Filipino, Indonesian). Surnames are
+  grouped too — gendered where real (Russian Ivanov/Ivanova, Polish -ski/-ska)
+  and with distinctly-female additions (North-Indian Devi/Kumari) over unisex
+  bases (Kumar/Das). `NameAnonymizer(gender=…, ethnicity=…)` fixes a gender
+  (`male`/`female`/`third`/`undisclosed`) and/or an ethnic group; **third
+  gender** mixes given names within an ethnicity, **undisclosed** draws from any
+  ethnicity.
+- **Gender/ethnicity can be read from another column** and mapped:
+  `NameAnonymizer(gender_column=…, ethnicity_column=…)` with per-value
+  `gender_map` / `ethnicity_map` overrides. Values in any encoding (M/F, 0/1 per
+  ISO-5218, `male`/`female`, other languages) are auto-detected
+  (`suggest_gender_mapping` / `suggest_ethnicity_mapping`) with a manual
+  fallback. `randomize_gender=True` reassigns genders and rewrites the gender
+  column so both fields are anonymized together.
+- **Custom name libraries.** `export_names_library()` writes the current library
+  as an editable module; `load_names_library(path=…)` (or the
+  `DATA_SAMPLER_NAMES` env var) activates one for the session; and
+  `install_names_library(path=…)` installs one permanently into the package.
+- **Report screen shows a "reproduce this in Python" snippet** — the exact
+  `ds.load_file / sample / anonymize / reduce_columns / save_output` calls that
+  reproduce the run — and it's included in the saved report `.txt`. Every TUI
+  capability now maps to the public API.
+- **Remote inputs.** `load_file` (and the TUI file screen) accept `http(s)` URLs
+  (e.g. GitHub raw links). The DuckDB engine loads `httpfs` on demand so it can
+  sample remote `s3://` / `https://` **Parquet with HTTP range requests** — a
+  multi-GB remote file is sampled out-of-core without downloading it whole.
+- **TUI restyle** — btop-inspired rounded, quiet-until-focused inputs / selects
+  / switches and outlined (non-solid) buttons; the columns table's per-stat
+  `mean`/`median`/`mode`/`sd` columns; the report save clarifies it includes the
+  histograms.
+
 ## v3.4.1 — 2026-07-24
 
 - **TUI columns table now breaks the single summary cell into separate

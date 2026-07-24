@@ -18,7 +18,7 @@ Public API::
 
 from __future__ import annotations
 
-__version__ = "3.4.1"
+__version__ = "3.5.0"
 
 from .io import SUPPORTED_EXTENSIONS, list_sheets, load_file, save_output
 from .reduce import ReductionResult, reduce_columns
@@ -60,9 +60,16 @@ __all__ = [
     "format_column_histograms",
     "anonymize",
     "make_anonymizer",
+    "NameAnonymizer",
+    "suggest_gender_mapping",
+    "suggest_ethnicity_mapping",
     "AnonymizationPlan",
     "suggest_type",
     "TYPE_OPTIONS",
+    "export_names_library",
+    "load_names_library",
+    "install_names_library",
+    "name_ethnicities",
     "run_tui",
 ]
 
@@ -70,13 +77,30 @@ __all__ = [
 def __getattr__(name: str):
     # Lazy imports: keep pandas-only workflows fast and let the core API work
     # even while optional pieces (TUI) are not yet importable.
-    if name in ("anonymize", "make_anonymizer"):
+    if name in (
+        "anonymize", "make_anonymizer", "NameAnonymizer",
+        "suggest_gender_mapping", "suggest_ethnicity_mapping",
+    ):
         # importlib, not `from . import anonymize`: the fromlist form calls
         # hasattr(package, "anonymize"), which re-enters this __getattr__.
         import importlib
 
         _anon = importlib.import_module(".anonymize", __name__)
         return getattr(_anon, name)
+    if name in (
+        "export_names_library", "load_names_library",
+        "install_names_library", "name_ethnicities",
+    ):
+        import importlib
+
+        _n = importlib.import_module("._names", __name__)
+        _alias = {
+            "export_names_library": "export_library",
+            "load_names_library": "load_library",
+            "install_names_library": "install_library",
+            "name_ethnicities": "ETHNICITIES",
+        }[name]
+        return getattr(_n, _alias)
     if name in ("AnonymizationPlan", "suggest_type", "TYPE_OPTIONS"):
         import importlib
 

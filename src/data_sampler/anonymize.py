@@ -150,43 +150,164 @@ def _fresh(seen: set, generate, rng: random.Random, tries: int = 100) -> str:
     return f"{base} {i}"
 
 
+# ── gender / ethnicity resolution (used by NameAnonymizer) ──────────────────────
+
+GENDERS = ("male", "female", "third", "undisclosed")
+
+# ISO/IEC 5218 numeric codes plus common textual encodings in several languages
+_MALE_TOKENS = {
+    "m", "male", "man", "men", "boy", "1", "männlich", "mannlich", "homme",
+    "hombre", "masculino", "maschio", "erkek", "мужской", "男", "남",
+}
+_FEMALE_TOKENS = {
+    "f", "female", "woman", "women", "girl", "2", "weiblich", "femme", "mujer",
+    "feminino", "femmina", "kadin", "kadın", "женский", "女", "여",
+}
+_THIRD_TOKENS = {
+    "x", "o", "other", "nonbinary", "non-binary", "non binary", "nb", "enby",
+    "third", "third gender", "genderqueer", "diverse", "divers", "d", "3",
+}
+_UNDISCLOSED_TOKENS = {
+    "", "u", "unknown", "undisclosed", "not disclosed", "prefer not to say",
+    "prefer not", "n/a", "na", "none", "null", "nan", "0", "9", "?",
+}
+
+
+def _auto_gender(value) -> str | None:
+    """Best-effort map of a raw gender-column value to a canonical gender.
+
+    Returns ``"male"`` / ``"female"`` / ``"third"`` / ``"undisclosed"``, or
+    ``None`` when the value is unrecognized (so the caller can fall back to a
+    fixed gender, or a manual mapping can override it).
+    """
+    s = str(value).strip().lower()
+    if s in _MALE_TOKENS:
+        return "male"
+    if s in _FEMALE_TOKENS:
+        return "female"
+    if s in _THIRD_TOKENS:
+        return "third"
+    if s in _UNDISCLOSED_TOKENS:
+        return "undisclosed"
+    # conservative textual fallback for values we didn't enumerate
+    if s.startswith("male") or s.startswith("man"):
+        return "male"
+    if s.startswith("female") or s.startswith("woman") or s.startswith("fem"):
+        return "female"
+    return None
+
+
+def _auto_ethnicity(value) -> str | None:
+    """Best-effort map of a raw ethnicity-column value to a known group/prefix.
+
+    Matches an exact group (``"chinese"``, ``"indian_bengali_hindu"``) or a
+    family prefix (``"indian"`` → all ``indian_*`` groups). Returns ``None`` if
+    nothing matches.
+    """
+    s = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    if not s:
+        return None
+    if s in _names.FIRST_ETHNICITIES:
+        return s
+    if any(e == s or e.startswith(s + "_") for e in _names.FIRST_ETHNICITIES):
+        return s  # usable as a family prefix
+    return None
+
+
+def suggest_gender_mapping(values) -> dict:
+    """Auto-detect a ``{raw value: gender}`` map for the distinct values of a
+    gender column (``None`` for values needing a manual choice). For the TUI's
+    "auto-detect + manual override" mapping step and for scripted use."""
+    seen: dict = {}
+    for v in values:
+        if v not in seen:
+            seen[v] = _auto_gender(v)
+    return seen
+
+
+def suggest_ethnicity_mapping(values) -> dict:
+    """Auto-detect a ``{raw value: ethnicity}`` map for the distinct values of
+    an ethnicity column (``None`` where no group matched)."""
+    seen: dict = {}
+    for v in values:
+        if v not in seen:
+            seen[v] = _auto_ethnicity(v)
+    return seen
+
+
 class NameAnonymizer(ColumnAnonymizer):
     """Replace values with realistic names from the bundled name library.
 
     ``style`` is one of ``first``, ``last``, ``first_last`` (default),
-    ``first_middle_last``, ``last_first``. Replacements are unique within the
-    column; if the requested style cannot supply enough distinct
-    combinations, middle names are added automatically.
+    ``first_middle_last``, ``last_first``.
+
+    Gender and ethnicity shape which names are drawn:
+
+    - ``gender`` fixes one gender for the whole column — ``"male"``,
+      ``"female"``, ``"third"`` (names mixed across genders but kept within an
+      ethnicity), ``"undisclosed"`` (any gender, any ethnicity), or ``None``
+      (a global mix).
+    - ``ethnicity`` fixes an ethnic group/prefix (e.g. ``"chinese"``,
+      ``"indian"``, ``"indian_bengali_hindu"``); ``None`` draws from all.
+    - ``gender_column`` / ``ethnicity_column`` instead read per-row values from
+      *another* column and map them per value. ``gender_map`` / ``ethnicity_map``
+      override the auto-detection for specific raw values.
+    - ``randomize_gender`` (only with ``gender_column``) reassigns each name a
+      random gender and returns a rewritten gender column too, so both the names
+      and the gender field are anonymized consistently.
+
+    Replacements are unique within the column; middle names are added
+    automatically if a style can't supply enough distinct combinations.
     """
 
     STYLES = ("first", "last", "first_last", "first_middle_last", "last_first")
 
-    def __init__(self, style: str = "first_last"):
+    def __init__(
+        self,
+        style: str = "first_last",
+        *,
+        gender: str | None = None,
+        ethnicity: str | None = None,
+        gender_column: str | None = None,
+        ethnicity_column: str | None = None,
+        gender_map: dict | None = None,
+        ethnicity_map: dict | None = None,
+        randomize_gender: bool = False,
+    ):
         if style not in self.STYLES:
             raise ValueError(
                 f"Unknown name style {style!r}. Choose from {self.STYLES}."
             )
+        if gender is not None and gender not in GENDERS:
+            raise ValueError(f"Unknown gender {gender!r}. Choose from {GENDERS} or None.")
         self.style = style
+        self.gender = gender
+        self.ethnicity = ethnicity
+        self.gender_column = gender_column
+        self.ethnicity_column = ethnicity_column
+        self.gender_map = dict(gender_map) if gender_map else None
+        self.ethnicity_map = dict(ethnicity_map) if ethnicity_map else None
+        self.randomize_gender = bool(randomize_gender)
 
-    @staticmethod
-    def _capacity(style: str) -> int:
-        f, m, last = (
-            len(_names.FIRST_NAMES),
-            len(_names.MIDDLE_NAMES),
-            len(_names.LAST_NAMES),
+    @property
+    def is_linked(self) -> bool:
+        """True when the anonymizer needs another column (gender/ethnicity)."""
+        return bool(
+            self.gender_column or self.ethnicity_column or self.randomize_gender
         )
-        return {
-            "first": f,
-            "last": last,
-            "first_last": f * last,
-            "last_first": f * last,
-            "first_middle_last": f * m * last,
-        }[style]
 
-    def _generate(self, style: str, rng: random.Random) -> str:
-        first = rng.choice(_names.FIRST_NAMES)
+    def _pools(self, gender: str | None, ethnicity: str | None):
+        if gender == "undisclosed":  # reveal nothing: any gender, any ethnicity
+            return _names.first_names(None, None), _names.last_names(None, None)
+        if gender == "third":  # mixed across genders, kept within the ethnicity
+            return _names.first_names(None, ethnicity), _names.last_names(None, ethnicity)
+        return _names.first_names(gender, ethnicity), _names.last_names(gender, ethnicity)
+
+    def _generate(self, style, rng, gender=None, ethnicity=None) -> str:
+        first_pool, last_pool = self._pools(gender, ethnicity)
+        first = rng.choice(first_pool)
+        last = rng.choice(last_pool)
         middle = rng.choice(_names.MIDDLE_NAMES)
-        last = rng.choice(_names.LAST_NAMES)
         return {
             "first": first,
             "last": last,
@@ -195,23 +316,103 @@ class NameAnonymizer(ColumnAnonymizer):
             "last_first": f"{last}, {first}",
         }[style]
 
-    def build_replacements(self, uniques, rng):
-        n = len(uniques)
-        style = self.style
-        # keep the collision rate low: escalate once past half capacity
-        if n > self._capacity(style) // 2:
-            style = "first_middle_last"
-            log.debug(
-                "NameAnonymizer: %d values exceed half capacity of %r; "
-                "using first_middle_last", n, self.style,
-            )
+    def _capacity(self, style, gender=None, ethnicity=None) -> int:
+        f = len(_names.first_names(None if gender == "third" else gender,
+                                   None if gender == "undisclosed" else ethnicity))
+        last = len(_names.last_names(None if gender in ("third", "undisclosed") else gender,
+                                     None if gender == "undisclosed" else ethnicity))
+        m = len(_names.MIDDLE_NAMES)
+        return {
+            "first": f, "last": last, "first_last": f * last,
+            "last_first": f * last, "first_middle_last": f * m * last,
+        }[style]
+
+    def _make_unique(self, per_unique, rng) -> list[str]:
+        """Generate one unique replacement per (gender, ethnicity) pair."""
         seen: set[str] = set()
         out: list[str] = []
-        for _ in range(n):
-            name = _fresh(seen, lambda r: self._generate(style, r), rng)
+        for gender, ethnicity in per_unique:
+            style = self.style
+            # escalate to add a middle name if this pool is getting crowded
+            if style != "first_middle_last" and len(out) > self._capacity(
+                style, gender, ethnicity
+            ) // 2:
+                style = "first_middle_last"
+            name = _fresh(seen, lambda r: self._generate(style, r, gender, ethnicity), rng)
             seen.add(name)
             out.append(name)
         return out
+
+    def build_replacements(self, uniques, rng):
+        # fixed (or global-mix) mode: one (gender, ethnicity) for every unique
+        per_unique = [(self.gender, self.ethnicity)] * len(uniques)
+        return self._make_unique(per_unique, rng)
+
+    @staticmethod
+    def _first_value_per_unique(codes, source: pd.Series, n: int) -> list:
+        """First non-null ``source`` value seen for each factorized code."""
+        vals = source.to_numpy()
+        out: list = [None] * n
+        filled = 0
+        for row, code in enumerate(codes):
+            if code >= 0 and out[code] is None:
+                v = vals[row]
+                if not (isinstance(v, float) and np.isnan(v)) and v is not None:
+                    out[code] = v
+                    filled += 1
+                    if filled == n:
+                        break
+        return out
+
+    def transform_linked(self, series, df, rng=None):
+        """Transform ``series`` using gender/ethnicity read from other columns.
+
+        Returns ``(names, gender_column_or_None)``. The second element is a
+        rewritten gender column (only when ``randomize_gender`` is set with a
+        ``gender_column``), otherwise ``None``.
+        """
+        rng = rng if rng is not None else random.Random()
+        codes, uniques = pd.factorize(series, use_na_sentinel=True)
+        n = len(uniques)
+        if n == 0:
+            return series.copy(), None
+
+        genders: list = [self.gender] * n
+        ethnicities: list = [self.ethnicity] * n
+        if self.gender_column:
+            raw = self._first_value_per_unique(codes, df[self.gender_column], n)
+            genders = [self._map_gender(v) for v in raw]
+        if self.ethnicity_column:
+            raw = self._first_value_per_unique(codes, df[self.ethnicity_column], n)
+            ethnicities = [self._map_ethnicity(v) for v in raw]
+        if self.randomize_gender:
+            genders = [rng.choice(("male", "female")) for _ in range(n)]
+
+        repl = self._make_unique(list(zip(genders, ethnicities)), rng)
+        names = self._restore_dtype(series, self._gather(series, codes, repl))
+
+        new_gender = None
+        if self.randomize_gender and self.gender_column:
+            labels = np.asarray(genders, dtype=object)
+            safe = np.where(codes >= 0, codes, 0)
+            new_gender = pd.Series(
+                labels[safe], index=series.index, name=self.gender_column
+            )
+            if (codes < 0).any():
+                new_gender = new_gender.where(pd.Series(codes >= 0, index=series.index))
+        return names, new_gender
+
+    def _map_gender(self, value) -> str | None:
+        if self.gender_map and value in self.gender_map:
+            return self.gender_map[value]
+        detected = _auto_gender(value)
+        return detected if detected is not None else self.gender
+
+    def _map_ethnicity(self, value) -> str | None:
+        if self.ethnicity_map and value in self.ethnicity_map:
+            return self.ethnicity_map[value]
+        detected = _auto_ethnicity(value)
+        return detected if detected is not None else self.ethnicity
 
 
 class SequentialIdAnonymizer(ColumnAnonymizer):
@@ -459,5 +660,16 @@ def anonymize(
             raise KeyError(f"Column {col!r} not found in DataFrame")
         anonymizer = _coerce(raw)
         log.info("anonymizing column %r with %s", col, type(anonymizer).__name__)
-        out[col] = anonymizer.transform(out[col], rng)
+        # a NameAnonymizer that reads gender/ethnicity from other columns needs
+        # the whole frame, and may rewrite the gender column alongside the names
+        if isinstance(anonymizer, NameAnonymizer) and anonymizer.is_linked:
+            for linked in (anonymizer.gender_column, anonymizer.ethnicity_column):
+                if linked and linked not in df.columns:
+                    raise KeyError(f"Linked column {linked!r} not found in DataFrame")
+            names, new_gender = anonymizer.transform_linked(out[col], out, rng)
+            out[col] = names
+            if new_gender is not None:
+                out[anonymizer.gender_column] = new_gender
+        else:
+            out[col] = anonymizer.transform(out[col], rng)
     return out

@@ -11,13 +11,30 @@ duckdb = pytest.importorskip("duckdb")
 
 from data_sampler.engine import (  # noqa: E402
     DuckDBEngine,
+    _is_remote,
     _proportional_allocation,
+    _remote_ext,
     duckdb_available,
     large_materialization_warning,
     should_use_engine,
     sample as engine_sample,
     stats as engine_stats,
 )
+
+
+def test_remote_detection_and_ext():
+    assert _is_remote("https://host/data.parquet")
+    assert _is_remote("s3://bucket/key.parquet")
+    assert not _is_remote("/tmp/local.parquet")
+    assert not _is_remote(pd.DataFrame())
+    assert _remote_ext("https://host/dir/data.parquet?token=xyz") == ".parquet"
+    assert _remote_ext("https://host/dir/data.csv") == ".csv"
+
+
+def test_should_use_engine_for_remote_parquet():
+    # remote Parquet auto-selects the engine (range requests); remote CSV doesn't
+    assert should_use_engine("https://host/big.parquet") is True
+    assert should_use_engine("https://host/big.csv") is False
 
 
 @pytest.fixture

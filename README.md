@@ -20,6 +20,10 @@ Use it to:
   trigger it.
 - **Cut a 2 GB export down to 500 rows** for a demo or prototype that still
   behaves like the real thing.
+- **Narrow a wide table, not just shorten it** — optionally collapse the
+  numeric columns into a handful of principal components (PCA) on the way out,
+  so the shared sample is short *and* narrow, with a report of how much
+  variance each component keeps and which columns moved together.
 - **Build test fixtures that mirror production skew** instead of uniform toy
   data.
 - **Give a class or workshop realistic data** without a data-sharing
@@ -47,6 +51,20 @@ Requires Python 3.10+. For development, clone the repo and
 `pip install -e ".[dev]"`.
 
 ## Terminal UI
+
+*Columns screen — per-column stats (mean / median / mode / sd), anonymizer,
+stratify and reduce config, with multi-select for bulk edits:*
+
+![data-sampler columns screen](docs/img/tui-columns.png)
+
+*File screen — type a path or pick one from the directory browser:*
+
+![data-sampler file screen](docs/img/tui-file.png)
+
+*Report screen — stratification report on the left, source-vs-sample column
+histograms on the right:*
+
+![data-sampler report screen](docs/img/tui-report.png)
 
 ```sh
 data-sampler            # no arguments → opens the TUI
@@ -147,6 +165,9 @@ data-sampler wide.csv 500 --reduce-variance 0.9
 import data_sampler as ds
 
 df = ds.load_file("data.xlsx", sheet="Sheet2")
+# …or straight from a URL (GitHub raw, S3, etc.); large remote Parquet can be
+# sampled out-of-core with the DuckDB engine, without downloading it whole:
+# df = ds.load_file("https://raw.githubusercontent.com/owner/repo/main/data.csv")
 
 # Data Wrangler-style column stats
 for s in ds.compute_stats(df):
@@ -170,6 +191,18 @@ anon = ds.anonymize(
     },
     seed=7,
 )
+
+# gender- and ethnicity-aware names: fix them, or read them from other columns
+gendered = ds.anonymize(result.data, {
+    "name": ds.NameAnonymizer(gender="female", ethnicity="chinese"),
+    # or map per row from existing columns (values auto-detected + overridable):
+    # "name": ds.NameAnonymizer(gender_column="sex", ethnicity_column="origin"),
+}, seed=7)
+
+# bring your own names: export the library, edit it, load it back
+ds.export_names_library("my_names.py")          # editable copy of the current library
+ds.load_names_library(path="my_names.py")       # activate it for this session
+# ds.install_names_library("my_names.py")        # …or install permanently
 
 # optionally collapse the numeric columns into principal components
 red = ds.reduce_columns(anon, variance_ratio=0.9, exclude=["cust_id"])
@@ -289,7 +322,7 @@ Missing values are left as missing. All anonymizers accept a seed (via
 
 | Kind | Replaces values with | Options (defaults) |
 | --- | --- | --- |
-| `names` | Realistic names from a bundled library of first, middle, and last names | `style`: `first_last`, `first_middle_last`, `last_first`, `first`, `last` |
+| `names` | Realistic names from a bundled library grouped by ethnicity + gender (33 groups) | `style`: `first_last`, `first_middle_last`, `last_first`, `first`, `last`; `gender`: `male`/`female`/`third`/`undisclosed`; `ethnicity`; or `gender_column`/`ethnicity_column` (+ `gender_map`/`ethnicity_map`, `randomize_gender`) |
 | `sequential_id` | `start`, `start+interval`, ... in order of first appearance | `start` (1), `interval` (1), `prefix` (`""`), `width` (0, zero-pads) |
 | `numeric_jitter` | A random number within ±`pct` of the original | `pct` (0.2 = ±20 %), `round_to` (decimal places) |
 | `datetime_jitter` | A date/time shifted by a random offset within ±`max_delta` | `max_delta` (`"7D"`; any `pandas.Timedelta` string), `unit` (`"s"`; jitter resolution) |
@@ -537,10 +570,11 @@ python -m build        # build the wheel + sdist into dist/
 
 Logging is controlled by `DATA_SAMPLER_LOG` (`quiet`/`info`/`verbose`) and
 `DATA_SAMPLER_LOG_FILE`. See `ROADMAP.md` for planned work and
-`TROUBLESHOOTING.md` for known failure modes.
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for known failure modes.
 
 Releases go to [PyPI](https://pypi.org/project/data-sampler/) via a
-human-triggered, test-gated GitHub Actions workflow — see `RELEASING.md`.
+human-triggered, test-gated GitHub Actions workflow — see
+[`docs/RELEASING.md`](docs/RELEASING.md).
 
 ---
 

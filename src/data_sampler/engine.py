@@ -29,6 +29,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,18 @@ LARGE_ROW_THRESHOLD = 5_000_000
 
 # extensions DuckDB can read natively (no pandas round-trip)
 _NATIVE_READERS = (".csv", ".tsv", ".json", ".parquet")
+
+
+def _is_remote(source) -> bool:
+    """Whether ``source`` is a remote URI DuckDB reads via httpfs (http/https/s3)."""
+    return isinstance(source, str) and source.lower().startswith(
+        ("http://", "https://", "s3://", "gs://", "gcs://", "az://")
+    )
+
+
+def _remote_ext(uri: str) -> str:
+    """Extension of a remote URI's path, ignoring the query string."""
+    return Path(urlparse(uri).path).suffix.lower()
 
 
 class DuckDBUnavailable(RuntimeError):
@@ -154,6 +167,7 @@ class DuckDBEngine:
             f"PRAGMA temp_directory={_quote_str(temp_directory or tempfile.gettempdir())}"
         )
         self._reg = 0
+        self._httpfs_ready = False  # lazily INSTALL/LOAD httpfs on first remote read
         # per-source row-count cache: one engine session assumes its file
         # sources do not change underneath it, so count(*) runs once per file
         # instead of once per operation (row_count/sample/strat-selection/stats)
@@ -173,20 +187,43 @@ class DuckDBEngine:
 
     # ── source resolution ─────────────────────────────────────────────────────
 
+    def _ensure_httpfs(self) -> None:
+        """Load the httpfs extension so ``read_parquet``/``read_csv`` can take
+        http(s)/s3 URIs (Parquet uses HTTP range requests — only the needed
+        row-groups are fetched, so a multi-GB remote file is never downloaded
+        whole). Best-effort: needs network on first install."""
+        if self._httpfs_ready:
+            return
+        try:
+            self.con.execute("INSTALL httpfs")
+            self.con.execute("LOAD httpfs")
+            self._httpfs_ready = True
+        except Exception as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "reading a remote (http/s3) source needs DuckDB's httpfs "
+                f"extension, which could not be installed/loaded: {exc}"
+            ) from exc
+
     def _source_sql(self, source) -> str:
         """Return a SQL table expression for ``source``.
 
-        ``source`` may be a path (CSV/TSV/JSON/Parquet, read natively) or a
-        pandas DataFrame (registered zero-copy via Arrow).
+        ``source`` may be a local path or an http(s)/s3 **URL** (CSV/TSV/JSON/
+        Parquet, read natively — remote via httpfs), or a pandas DataFrame
+        (registered zero-copy via Arrow).
         """
         if isinstance(source, pd.DataFrame):
             self._reg += 1
             name = f"_src_df_{self._reg}"
             self.con.register(name, source)
             return name
-        p = Path(source)
-        ext = p.suffix.lower()
-        path = _quote_str(str(p))
+        if _is_remote(source):
+            self._ensure_httpfs()
+            ext = _remote_ext(str(source))
+            path = _quote_str(str(source))  # keep the URI verbatim (no Path())
+        else:
+            p = Path(source)
+            ext = p.suffix.lower()
+            path = _quote_str(str(p))
         if ext == ".parquet":
             return f"read_parquet({path})"
         if ext == ".csv":
@@ -470,6 +507,10 @@ class DuckDBEngine:
 
             return name, _quote_ident("_ds_rid"), fetch
 
+        if _is_remote(source):
+            # a URL has no cheap local stable row id; the full-width single-pass
+            # shape reads it fine via httpfs (range requests still apply)
+            return None
         p = Path(source)
         if p.suffix.lower() != ".parquet":
             return None
@@ -668,6 +709,10 @@ def should_use_engine(source, row_threshold: int = LARGE_ROW_THRESHOLD) -> bool:
         return False
     if isinstance(source, pd.DataFrame):
         return len(source) >= row_threshold
+    if _is_remote(source):
+        # remote Parquet is always a win (httpfs range requests avoid a full
+        # download); other remote formats fall to the pandas streaming path
+        return _remote_ext(source) == ".parquet"
     ext = Path(source).suffix.lower()
     if ext == ".parquet":
         return True
