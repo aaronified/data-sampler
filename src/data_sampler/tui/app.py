@@ -882,6 +882,12 @@ class ColumnsScreen(Screen):
             skip_reduce = self.query_one("#skip-reduce", Switch)
             if skip_reduce.value != cfg.skip_reduce:
                 skip_reduce.value = cfg.skip_reduce
+            # PCA reduction only ever touches continuous numeric columns, so the
+            # "skip from reduction" toggle is meaningless for string / categorical
+            # / boolean / datetime columns — hide the whole row for those
+            self.query_one("#reduce-skip-row").set_class(
+                self.stats[name].kind != "numeric", "hidden"
+            )
             # names gender / ethnicity controls
             gsel = self.query_one("#opt-names-gender", Select)
             if gsel.value != cfg.gender:

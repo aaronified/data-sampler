@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.5.1 — 2026-07-24
+
+- **The "skip from reduction (PCA)" toggle is hidden for non-numeric columns.**
+  PCA reduction only ever operates on continuous numeric columns (booleans and
+  datetimes are explicitly rejected; strings/categoricals never qualify), so the
+  toggle is meaningless on those columns. It now appears in the detail panel only
+  when the selected column is numeric — matching the columns table, which already
+  renders `—` in the reduce cell for non-numeric columns. No behavior change to
+  the reduction itself: skipped columns were, and remain, held out of the PCA
+  math entirely and passed through to the output unchanged.
+
 ## v3.5.0 — 2026-07-24
 
 - **Names anonymizer is now gender- and ethnicity-aware.** The bundled library

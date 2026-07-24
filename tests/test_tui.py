@@ -584,6 +584,31 @@ def test_non_numeric_skip_reduce_shows_dash(csv_file):
     run(go())
 
 
+def test_reduce_skip_toggle_hidden_for_non_numeric(csv_file):
+    """PCA reduction only ever touches continuous numeric columns, so the
+    'skip from reduction (PCA)' row must be shown for numeric columns and
+    hidden for string / categorical / boolean columns."""
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(160, 45)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            row = screen.query_one("#reduce-skip-row")
+
+            screen._sync_config_panel("score")   # numeric → shown
+            assert not row.has_class("hidden")
+
+            screen._sync_config_panel("region")  # categorical → hidden
+            assert row.has_class("hidden")
+
+            screen._sync_config_panel("active")  # boolean → hidden
+            assert row.has_class("hidden")
+
+            screen._sync_config_panel("id")      # numeric again → shown
+            assert not row.has_class("hidden")
+
+    run(go())
+
+
 def test_refresh_browser_action(csv_file):
     async def go():
         app = DataSamplerApp()

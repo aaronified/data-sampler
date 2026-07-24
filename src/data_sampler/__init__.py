@@ -18,7 +18,7 @@ Public API::
 
 from __future__ import annotations
 
-__version__ = "3.5.0"
+__version__ = "3.5.1"
 
 from .io import SUPPORTED_EXTENSIONS, list_sheets, load_file, save_output
 from .reduce import ReductionResult, reduce_columns
