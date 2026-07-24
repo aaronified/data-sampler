@@ -13,6 +13,12 @@ which picks DuckDB for Parquet/large files) samples out-of-core in parallel:
 
     data-sampler huge.parquet 10000 --engine duckdb --threads 8 \\
         --memory-limit 8GB --suggest
+
+Optionally reduce the numeric columns of the outgoing sample to K principal
+components — or to however many retain a target share of the variance:
+
+    data-sampler data.csv 500 --reduce-components 3 --reduce-exclude id
+    data-sampler data.csv 500 --reduce-variance 0.9
 """
 
 from __future__ import annotations
@@ -24,7 +30,12 @@ from . import __version__
 from ._logging import get_logger
 from .anonymize import anonymize, make_anonymizer
 from .io import load_file, save_output
-from .report import format_column_histograms, format_stratification_report
+from .reduce import reduce_columns
+from .report import (
+    format_column_histograms,
+    format_reduction_report,
+    format_stratification_report,
+)
 from .sampling import sample
 
 log = get_logger(__name__)
@@ -38,6 +49,24 @@ def _coerce_value(value: str):
             pass
     if value.lower() in ("true", "false"):
         return value.lower() == "true"
+    return value
+
+
+def _positive_int(text: str) -> int:
+    """argparse type: an integer >= 1 (rejects bad values at parse time)."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text}")
+    return value
+
+
+def _unit_interval(text: str) -> float:
+    """argparse type: a float strictly between 0 and 1."""
+    value = float(text)
+    if not 0.0 < value < 1.0:
+        raise argparse.ArgumentTypeError(
+            f"must be strictly between 0 and 1, got {text}"
+        )
     return value
 
 
@@ -110,6 +139,46 @@ def build_parser() -> argparse.ArgumentParser:
             "stats (columns set via --anon are left as given)"
         ),
     )
+    reduce_group = parser.add_mutually_exclusive_group()
+    reduce_group.add_argument(
+        "--reduce-components", type=_positive_int, metavar="N",
+        dest="reduce_components",
+        help=(
+            "PCA column reduction: replace the numeric columns with the first "
+            "N principal components (non-numeric columns are preserved; N is "
+            "capped at the number of usable numeric columns)"
+        ),
+    )
+    reduce_group.add_argument(
+        "--reduce-variance", type=_unit_interval, metavar="R",
+        dest="reduce_variance",
+        help=(
+            "PCA column reduction: keep the fewest principal components whose "
+            "cumulative explained-variance ratio reaches R (0 < R < 1)"
+        ),
+    )
+    parser.add_argument(
+        "--reduce-exclude", action="append", default=[], metavar="COL[,COL...]",
+        dest="reduce_exclude",
+        help=(
+            "numeric column(s) to exclude from PCA reduction and pass through "
+            "unchanged, e.g. identifiers (repeatable)"
+        ),
+    )
+    parser.add_argument(
+        "--reduce-prefix", default="PC", metavar="PREFIX", dest="reduce_prefix",
+        help=(
+            "name prefix for the principal-component columns (default PC → "
+            "PC1, PC2, …); change it if the source already has such a column"
+        ),
+    )
+    parser.add_argument(
+        "--reduce-no-standardize", action="store_true", dest="reduce_no_standardize",
+        help=(
+            "PCA column reduction: skip the per-column z-scoring (by default "
+            "columns are standardized so large-unit columns cannot dominate)"
+        ),
+    )
     parser.add_argument(
         "--engine", choices=("auto", "pandas", "duckdb"), default="auto",
         help=(
@@ -134,6 +203,65 @@ def build_parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     return parser
+
+
+def _reduce_requested(args) -> bool:
+    return args.reduce_components is not None or args.reduce_variance is not None
+
+
+def _validate_reduce_args(args, parser, columns) -> list[str]:
+    """Validate the reduce flags as soon as the source's columns are known —
+    BEFORE sampling, so a typo never costs a full (possibly out-of-core) run.
+
+    Returns the parsed ``--reduce-exclude`` column list.
+    """
+    exclude = [
+        c.strip() for chunk in args.reduce_exclude for c in chunk.split(",") if c.strip()
+    ]
+    if not _reduce_requested(args):
+        if exclude:
+            parser.error(
+                "--reduce-exclude requires --reduce-components or --reduce-variance"
+            )
+        if args.reduce_no_standardize:
+            parser.error(
+                "--reduce-no-standardize requires --reduce-components or "
+                "--reduce-variance"
+            )
+        return exclude
+    # compare stringified: Excel sources can carry non-string column labels
+    names = {str(c) for c in columns}
+    unknown = [c for c in exclude if c not in names]
+    if unknown:
+        parser.error(
+            f"--reduce-exclude: column(s) not found in file: {', '.join(unknown)}"
+        )
+    return exclude
+
+
+def _apply_reduction(args, parser, data, exclude):
+    """Run the optional PCA column reduction on the outgoing sample.
+
+    Returns ``(data, tag_suffix)`` — unchanged when no reduction was requested.
+    """
+    if not _reduce_requested(args):
+        return data, ""
+    try:
+        reduction = reduce_columns(
+            data,
+            n_components=args.reduce_components,
+            variance_ratio=args.reduce_variance,
+            exclude=exclude,
+            standardize=not args.reduce_no_standardize,
+            prefix=args.reduce_prefix,
+            seed=args.seed,
+        )
+    except ValueError as exc:
+        parser.error(f"column reduction: {exc}")
+    print()
+    print(format_reduction_report(reduction))
+    suffix = f"_pca{reduction.n_components}" if reduction.n_components else ""
+    return reduction.data, suffix
 
 
 def _build_engine_spec(args, parser, engine, cols) -> dict:
@@ -189,6 +317,7 @@ def _run_with_engine(args, parser, skip) -> int:
             parser.error(
                 f"--skip: column(s) not found in file: {', '.join(unknown_skip)}"
             )
+        reduce_exclude = _validate_reduce_args(args, parser, cols)
         spec = _build_engine_spec(args, parser, engine, cols)
         result = engine.sample(
             args.source, args.count,
@@ -213,7 +342,8 @@ def _run_with_engine(args, parser, skip) -> int:
             parser.error(f"anonymization failed: {exc}")
         print(f"Anonymized columns: {', '.join(spec)}")
 
-    tag = f"sample_{args.count}" + ("_anon" if spec else "")
+    data, reduce_tag = _apply_reduction(args, parser, data, reduce_exclude)
+    tag = f"sample_{args.count}" + ("_anon" if spec else "") + reduce_tag
     out_path = save_output(data, args.source, tag, output_folder=args.outdir)
     print(f"\nSampled {len(data):,} rows.")
     print(f"Output saved to: {out_path}")
@@ -288,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     unknown_skip = [c for c in skip if c not in df.columns]
     if unknown_skip:
         parser.error(f"--skip: column(s) not found in file: {', '.join(unknown_skip)}")
+    reduce_exclude = _validate_reduce_args(args, parser, df.columns)
 
     # parse explicit --anon flags into (column, kind, options) triples
     anon_specs: list[tuple[str, str, dict]] = []
@@ -352,7 +483,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"anonymization failed: {exc}")
         print(f"Anonymized columns: {', '.join(spec)}")
 
-    tag = f"sample_{args.count}" + ("_anon" if spec else "")
+    data, reduce_tag = _apply_reduction(args, parser, data, reduce_exclude)
+    tag = f"sample_{args.count}" + ("_anon" if spec else "") + reduce_tag
     out_path = save_output(data, args.source, tag, output_folder=args.outdir)
     print(f"\nSampled {len(data)} rows.")
     print(f"Output saved to: {out_path}")

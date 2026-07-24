@@ -9,20 +9,24 @@ Public API::
     result = ds.sample(df, 500, exclude_columns=["notes"])
     print(ds.format_stratification_report(df, result))
     anon = ds.anonymize(result.data, {"name": "names", "id": ("sequential_id", {"start": 1000})})
-    ds.save_output(anon, "data.csv", tag="sample_500_anon")
+    red = ds.reduce_columns(anon, variance_ratio=0.9, exclude=["id"])  # optional PCA
+    print(ds.format_reduction_report(red))
+    ds.save_output(red.data, "data.csv", tag="sample_500_anon_pca")
 
     ds.run_tui()                                 # launch the terminal UI
 """
 
 from __future__ import annotations
 
-__version__ = "3.3.1"
+__version__ = "3.4.0"
 
 from .io import SUPPORTED_EXTENSIONS, list_sheets, load_file, save_output
+from .reduce import ReductionResult, reduce_columns
 from .report import (
     column_histogram_data,
     format_column_histograms,
     format_distribution,
+    format_reduction_report,
     format_stratification_report,
 )
 from .sampling import (
@@ -47,7 +51,10 @@ __all__ = [
     "sample",
     "stratified_sample",
     "find_stratification_columns",
+    "ReductionResult",
+    "reduce_columns",
     "format_stratification_report",
+    "format_reduction_report",
     "format_distribution",
     "column_histogram_data",
     "format_column_histograms",

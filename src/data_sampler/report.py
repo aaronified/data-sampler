@@ -7,6 +7,7 @@ import math
 import numpy as np
 import pandas as pd
 
+from .reduce import ReductionResult
 from .sampling import SampleResult
 from .stats import _classify, _fmt_num
 
@@ -285,5 +286,80 @@ def format_stratification_report(
                         f"largest has {largest} rows (needs {min_size_for_one}), "
                         f"total allocated = {total_alloc}"
                     )
+
+    return "\n".join(out)
+
+
+def format_reduction_report(result: ReductionResult, top_drivers: int = 3) -> str:
+    """Build the PCA column-reduction report: variance kept per component,
+    the correlated column groups that explain *why* the block compresses, and
+    each component's top driving columns.
+
+    For a no-op reduction (nothing was reduced), returns the notes only.
+    """
+    if result.n_components == 0:
+        return "\n".join(result.notes)
+
+    out: list[str] = []
+    out.append("╔═════════════════════════════════════════════════════════════════════╗")
+    out.append("║                       COLUMN REDUCTION (PCA)                        ║")
+    out.append("╚═════════════════════════════════════════════════════════════════════╝")
+    out.append(
+        f"\n  {len(result.source_columns)} numeric columns → "
+        f"{result.n_components} component(s), "
+        f"{result.total_variance_retained * 100:.1f}% of the variance retained"
+        + ("  (columns z-scored first)" if result.standardized else "")
+    )
+    out.append(f"  Columns reduced: {', '.join(result.source_columns)}")
+
+    out.append(f"\n  {'Component':>12}  {'variance':>9}  {'cumulative':>10}")
+    out.append(f"  {'─' * 37}")
+    for name, evr, cum in zip(
+        result.component_names,
+        result.explained_variance_ratio,
+        result.cumulative_variance_ratio,
+    ):
+        bar = "█" * int(evr * BAR_WIDTH) + "░" * (BAR_WIDTH - int(evr * BAR_WIDTH))
+        out.append(f"  {name:>12}  {evr * 100:8.1f}%  {cum * 100:9.1f}%  {bar}")
+
+    # rationale: which source columns move together (high |correlation|),
+    # i.e. the redundancy PCA collapsed into shared components
+    corr = result.correlation_matrix
+    if result.column_groups and corr is not None:
+        out.append("\n  CORRELATED COLUMN GROUPS — these move together, so PCA")
+        out.append("  represents each group with shared components:")
+        for i, group in enumerate(result.column_groups, 1):
+            pair_rs = [
+                abs(float(corr.loc[a, b]))
+                for gi, a in enumerate(group)
+                for b in group[gi + 1 :]
+            ]
+            mean_r = sum(pair_rs) / len(pair_rs) if pair_rs else 0.0
+            out.append(f"    group {i}: {', '.join(group)}  (mean |r| = {mean_r:.2f})")
+        grouped = {c for g in result.column_groups for c in g}
+        singles = [c for c in result.source_columns if c not in grouped]
+        if singles:
+            out.append(
+                f"    not strongly paired ({len(singles)}): {', '.join(singles)}"
+            )
+    elif corr is not None:
+        out.append(
+            "\n  No strongly correlated column groups — the columns are largely"
+            "\n  independent, so each component blends many of them."
+        )
+
+    if result.components is not None and len(result.components):
+        out.append("\n  Top drivers per component (|loading|):")
+        for name, row in zip(result.component_names, result.components):
+            order = np.argsort(-np.abs(row))[:top_drivers]
+            drivers = ", ".join(
+                f"{result.source_columns[j]} ({row[j]:+.2f})" for j in order
+            )
+            out.append(f"    {name}  ←  {drivers}")
+
+    if result.notes:
+        out.append("")
+        for note in result.notes:
+            out.append(f"  Note: {note}")
 
     return "\n".join(out)

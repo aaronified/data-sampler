@@ -207,6 +207,44 @@ def test_stale_changed_messages_do_not_clobber_config(csv_file):
     run(go())
 
 
+def test_full_flow_with_pca_reduction(csv_file, tmp_path):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(160, 45)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            screen.query_one("#count", Input).value = "40"
+            screen.query_one("#seed", Input).value = "3"
+            screen.query_one("#reduce-mode", Select).value = "components"
+            screen.query_one("#reduce-value", Input).value = "1"
+            screen.action_run()
+            report = await wait_for_screen(app, pilot, ReportScreen)
+            out = tmp_path / "data_sample_40_pca1.csv"
+            assert out.exists()
+            df = pd.read_csv(out)
+            assert len(df) == 40
+            assert "PC1" in df.columns
+            assert "score" not in df.columns  # consumed with id into PC1
+            assert "region" in df.columns  # non-numeric preserved
+            content = str(report.query_one("#report-text", Static).content)
+            assert "COLUMN REDUCTION (PCA)" in content
+
+    run(go())
+
+
+def test_invalid_reduce_value_notifies_instead_of_running(csv_file):
+    async def go():
+        app = DataSamplerApp(path=str(csv_file))
+        async with app.run_test(size=(160, 45)) as pilot:
+            screen = await wait_for_screen(app, pilot, ColumnsScreen)
+            screen.query_one("#reduce-mode", Select).value = "variance"
+            screen.query_one("#reduce-value", Input).value = "1.5"
+            screen.action_run()
+            await pilot.pause()
+            assert isinstance(app.screen, ColumnsScreen)  # still here, no crash
+
+    run(go())
+
+
 def test_invalid_count_notifies_instead_of_running(csv_file):
     async def go():
         app = DataSamplerApp(path=str(csv_file))

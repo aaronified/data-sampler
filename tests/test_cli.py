@@ -106,6 +106,120 @@ def test_cli_outdir(csv_file, tmp_path):
     assert (out_dir / "data_sample_20.csv").exists()
 
 
+def test_cli_reduce_components(csv_file, capsys):
+    # demo_df's numeric block is id + score; both are consumed into PC1
+    code = main([str(csv_file), "50", "--seed", "1", "--reduce-components", "1"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "COLUMN REDUCTION (PCA)" in out
+    result = csv_file.parent / "data_sample_50_pca1.csv"
+    assert result.exists()
+    df = pd.read_csv(result)
+    assert len(df) == 50
+    assert "PC1" in df.columns
+    assert "score" not in df.columns and "id" not in df.columns  # consumed
+    assert "region" in df.columns  # non-numeric → preserved
+
+
+def test_cli_reduce_exclude_single_numeric_left_is_noop(csv_file, capsys):
+    # excluding id leaves only score — one usable numeric column is a no-op
+    code = main([
+        str(csv_file), "50", "--seed", "1",
+        "--reduce-components", "1", "--reduce-exclude", "id",
+    ])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "skipped" in out
+    result = csv_file.parent / "data_sample_50.csv"  # no _pca tag
+    assert result.exists()
+    df = pd.read_csv(result)
+    assert "score" in df.columns and "id" in df.columns
+
+
+def test_cli_reduce_variance(csv_file, capsys):
+    code = main([str(csv_file), "50", "--seed", "1", "--reduce-variance", "0.9"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "COLUMN REDUCTION (PCA)" in out
+    assert "variance retained" in out
+    outputs = list(csv_file.parent.glob("data_sample_50_pca*.csv"))
+    assert len(outputs) == 1
+    df = pd.read_csv(outputs[0])
+    assert any(c.startswith("PC") for c in df.columns)
+
+
+def test_cli_reduce_after_anonymize(csv_file):
+    # anonymize + reduce compose; tag carries both suffixes
+    code = main([
+        str(csv_file), "40", "--seed", "2",
+        "--anon", "name=names", "--reduce-components", "1",
+    ])
+    assert code == 0
+    result = csv_file.parent / "data_sample_40_anon_pca1.csv"
+    assert result.exists()
+    df = pd.read_csv(result)
+    assert "PC1" in df.columns
+    assert not df["name"].str.startswith("Person").any()
+
+
+def test_cli_reduce_selectors_are_mutually_exclusive(csv_file):
+    with pytest.raises(SystemExit):
+        main([
+            str(csv_file), "10",
+            "--reduce-components", "2", "--reduce-variance", "0.9",
+        ])
+
+
+def test_cli_reduce_bad_variance_exits(csv_file):
+    with pytest.raises(SystemExit):
+        main([str(csv_file), "10", "--reduce-variance", "1.5"])
+
+
+def test_cli_reduce_unknown_exclude_exits(csv_file):
+    with pytest.raises(SystemExit):
+        main([str(csv_file), "10", "--reduce-components", "1", "--reduce-exclude", "ghost"])
+
+
+def test_cli_reduce_exclude_requires_mode(csv_file):
+    with pytest.raises(SystemExit):
+        main([str(csv_file), "10", "--reduce-exclude", "id"])
+
+
+def test_cli_reduce_no_standardize_requires_mode(csv_file):
+    with pytest.raises(SystemExit):
+        main([str(csv_file), "10", "--reduce-no-standardize"])
+
+
+def test_cli_reduce_bad_components_rejected_at_parse_time(csv_file):
+    with pytest.raises(SystemExit):
+        main([str(csv_file), "10", "--reduce-components", "0"])
+
+
+def test_cli_reduce_prefix(csv_file):
+    code = main([
+        str(csv_file), "30", "--seed", "1",
+        "--reduce-components", "1", "--reduce-prefix", "DIM",
+    ])
+    assert code == 0
+    df = pd.read_csv(csv_file.parent / "data_sample_30_pca1.csv")
+    assert "DIM1" in df.columns and "PC1" not in df.columns
+
+
+def test_cli_reduce_exclude_matches_non_string_labels(tmp_path, demo_df):
+    # Excel numeric headers load as int column labels; --reduce-exclude must
+    # still match them (stringified comparison). id + extra remain reducible.
+    df = demo_df.rename(columns={"score": 2022})
+    df["extra"] = demo_df["score"] * 2 + 1
+    src = tmp_path / "years.xlsx"
+    df.to_excel(src, index=False)
+    code = main([str(src), "30", "--seed", "1", "--reduce-components", "1",
+                 "--reduce-exclude", "2022"])
+    assert code == 0
+    out = pd.read_excel(src.parent / "years_sample_30_pca1.xlsx")
+    assert "2022" in [str(c) for c in out.columns]  # excluded → preserved
+    assert "PC1" in [str(c) for c in out.columns]
+
+
 def test_cli_unknown_anon_kind_exits(csv_file):
     with pytest.raises(SystemExit):
         main([str(csv_file), "10", "--anon", "name=rot13"])
@@ -182,6 +296,28 @@ def test_cli_engine_explicit_anon(parquet_file):
 def test_cli_engine_rejects_interactive(parquet_file):
     with pytest.raises(SystemExit):
         main([str(parquet_file), "10", "--engine", "duckdb", "--interactive"])
+
+
+@needs_duckdb
+def test_cli_engine_reduce(parquet_file, capsys):
+    code = main([
+        str(parquet_file), "50", "--engine", "duckdb", "--seed", "1",
+        "--reduce-components", "1",
+    ])
+    assert code == 0
+    assert "COLUMN REDUCTION (PCA)" in capsys.readouterr().out
+    df = pd.read_parquet(parquet_file.parent / "data_sample_50_pca1.parquet")
+    assert "PC1" in df.columns
+    assert "score" not in df.columns and "region" in df.columns
+
+
+@needs_duckdb
+def test_cli_engine_reduce_unknown_exclude_exits(parquet_file):
+    with pytest.raises(SystemExit):
+        main([
+            str(parquet_file), "10", "--engine", "duckdb",
+            "--reduce-components", "1", "--reduce-exclude", "ghost",
+        ])
 
 
 @needs_duckdb

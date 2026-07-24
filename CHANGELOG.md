@@ -1,5 +1,41 @@
 # Changelog
 
+## v3.4.0 — 2026-07-24
+
+- **Added optional PCA column reduction** (`data_sampler.reduce`): after
+  sampling (and anonymization, if any), the numeric block of the outgoing
+  sample can be collapsed into its first *k* principal components — so the
+  delivered file is narrow as well as short. *k* is controlled one of two
+  ways: a component count (`--reduce-components N` /
+  `reduce_columns(df, n_components=N)`, capped at the number of usable
+  numeric columns) or a variance target (`--reduce-variance R` /
+  `variance_ratio=R`: the fewest components whose cumulative
+  explained-variance ratio reaches R). Non-numeric columns are always
+  preserved; `--reduce-exclude` passes chosen numeric columns (e.g.
+  identifiers) through unchanged, `--reduce-prefix` renames the `PC*`
+  output columns when the source already has one, and the tool warns when
+  an included column looks like an identifier. Reduce flags are validated
+  before sampling starts, so a typo never costs a full out-of-core run. Missing values are mean-imputed (the row count
+  never changes), constant/all-missing columns pass through with a note, and
+  columns are z-scored by default (`--reduce-no-standardize` opts out) so
+  large-unit columns cannot dominate. The exact-SVD implementation is pure
+  numpy — no new dependency — and deterministic across runs and platforms
+  (sign-fixed singular vectors). New public API: `reduce_columns`,
+  `ReductionResult`, `format_reduction_report`.
+- **Every reduction reports its rationale**, not just the variance kept: the
+  report lists per-component and cumulative explained variance, **the groups
+  of correlated columns that move together** (connected components of the
+  |r| ≥ 0.7 correlation graph — on standardized data PCA diagonalizes
+  exactly that correlation matrix, so the groups are a faithful account of
+  what compressed), each component's top driving columns, and any
+  imputation/passthrough/identifier notes. The full labelled correlation
+  matrix is available on `ReductionResult.correlation_matrix`.
+- Wired into all three surfaces: CLI flags on both the pandas and DuckDB
+  engine paths (the reduction always runs on the small sampled frame, never
+  the full source), a `reduce` control in the TUI run bar with the rationale
+  shown on the report screen, and the Python API. Output files gain a
+  `_pca{k}` tag suffix (e.g. `data_sample_500_anon_pca3.csv`).
+
 ## v3.3.1 — 2026-07-23
 
 - **Fixed the second CI-only TUI race** (caught, again, by the release CI —

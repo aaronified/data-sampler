@@ -72,7 +72,8 @@ The TUI is a panel-based dashboard (think btop / lazydocker):
    VS Code extension). Select a column to see full stats and distribution
    bars, choose an anonymizer for it, and toggle whether it should be
    skipped when preserving statistical variety (stratification). Set the
-   sample size, output folder, optional seed, and run.
+   sample size, output folder, optional seed, an optional PCA column
+   reduction (`reduce`: N components or a variance target), and run.
 3. **Report screen** — the stratification comparison and anonymization summary
    on the left, and a **column histograms** panel on the right showing every
    column's source-vs-sample distribution (numeric columns share bin edges;
@@ -99,6 +100,11 @@ data-sampler <source> <count> [options]
 | `--anon COL=KIND[:k=v,...]` | Anonymize a column (repeatable) |
 | `-i`, `--interactive` | Guided workflow: choose an anonymizer type per column from a menu |
 | `--suggest` | Auto-assign a suggested anonymizer type to each column from its stats |
+| `--reduce-components N` | PCA column reduction: replace the numeric columns with the first `N` principal components |
+| `--reduce-variance R` | PCA column reduction: keep the fewest components whose cumulative explained variance reaches `R` (0 < R < 1) |
+| `--reduce-exclude COL[,COL]` | Numeric column(s) to keep out of the reduction, e.g. identifiers (repeatable) |
+| `--reduce-prefix PREFIX` | Name prefix for the component columns (default `PC` → `PC1`, `PC2`, …) |
+| `--reduce-no-standardize` | Skip the per-column z-scoring before PCA |
 | `--engine {auto,pandas,duckdb}` | Sampling engine (default `auto`: DuckDB for Parquet/large inputs, pandas otherwise) |
 | `--threads N` | DuckDB engine: number of threads (default: all cores) |
 | `--memory-limit SIZE` | DuckDB engine: memory limit before spilling to disk (e.g. `8GB`) |
@@ -117,6 +123,11 @@ data-sampler data.csv 100 --skip region,notes --seed 7 \
 
 # large / out-of-core: sample a Parquet file in parallel with DuckDB
 data-sampler huge.parquet 10000 --engine duckdb --threads 8 --memory-limit 8GB --suggest
+
+# narrow the sample too: collapse the numeric columns into 3 principal
+# components (or keep however many retain 90% of the variance)
+data-sampler wide.csv 500 --reduce-components 3 --reduce-exclude cust_id
+data-sampler wide.csv 500 --reduce-variance 0.9
 ```
 
 ## Python API
@@ -149,7 +160,11 @@ anon = ds.anonymize(
     seed=7,
 )
 
-ds.save_output(anon, "data.xlsx", tag="sample_500_anon")
+# optionally collapse the numeric columns into principal components
+red = ds.reduce_columns(anon, variance_ratio=0.9, exclude=["cust_id"])
+print(ds.format_reduction_report(red))   # variance kept + correlated groups
+
+ds.save_output(red.data, "data.xlsx", tag="sample_500_anon_pca")
 ```
 
 ## Try it: bundled example
@@ -317,6 +332,34 @@ category. A side-by-side distribution report is produced for every run.
 If no suitable stratification columns exist, the tool falls back to pure
 random sampling automatically.
 
+### Reducing columns (PCA)
+
+Sampling narrows the *rows*; the optional PCA step narrows the *columns* of
+the outgoing sample. It replaces the numeric block with its first *k*
+principal components (`PC1..PCk`), controlled one of two ways:
+
+- **`--reduce-components N`** — `N` components in the output (capped at the
+  number of usable numeric columns, with a note when fewer are possible);
+- **`--reduce-variance R`** — the fewest components whose cumulative
+  explained-variance ratio reaches `R` (e.g. `0.9` keeps ≥ 90 % of the
+  numeric variance).
+
+Non-numeric columns (ids, categories, text, booleans, datetimes) are always
+preserved, and `--reduce-exclude` keeps chosen numeric columns out too —
+identifiers should be excluded, since an all-unique id forms its own
+artificial component (the tool warns when it spots one). Missing values are
+mean-imputed so the row count never changes; constant columns carry no signal
+and pass through unchanged. Columns are z-scored first by default (PCA on the
+correlation matrix), so a large-unit column such as a salary cannot dominate
+the components; `--reduce-no-standardize` turns that off.
+
+Every reduction prints its rationale: the variance each component retains,
+**the groups of correlated columns** that move together (which is exactly the
+redundancy PCA collapses — on standardized data PCA diagonalizes the
+correlation matrix), and each component's top driving columns. The reduction
+runs after anonymization, on the already-sampled rows, so the stratification
+and histogram reports still describe the original columns.
+
 ## Large data: the out-of-core DuckDB engine
 
 The default pandas path loads the whole file into memory. For inputs that are
@@ -438,6 +481,11 @@ columns, in one place.
   (~1.9× faster stats), report histograms skip near-unique columns instead
   of hashing millions of ids for a meaningless top-8, and the TUI computes
   stats in a worker thread so the UI never freezes on load.
+- **PCA column reduction on the way out.** `--reduce-components` /
+  `--reduce-variance` collapse a wide numeric block into a handful of
+  principal components *after* sampling, so the SVD runs on the small sampled
+  frame (never the full source) and the delivered file is narrow as well as
+  short.
 
 ### Correctness under scale
 
@@ -465,7 +513,8 @@ multi-threading for reproducibility (unseeded runs use all cores).
 
 Output keeps the source format and is named
 `{stem}_sample_{count}{ext}` — with an `_anon` suffix when anonymization ran
-(e.g. `data_sample_500_anon.csv`).
+and a `_pca{k}` suffix when PCA column reduction ran
+(e.g. `data_sample_500_anon_pca3.csv`).
 
 ## Development
 

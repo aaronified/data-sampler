@@ -39,7 +39,8 @@ from .. import __version__
 from .._logging import get_logger, redirect_to_file
 from ..anonymize import make_anonymizer
 from ..io import load_file, save_output
-from ..report import format_stratification_report
+from ..reduce import reduce_columns
+from ..report import format_reduction_report, format_stratification_report
 from ..sampling import sample
 from ..stats import ColumnStats, compute_stats, sparkline
 
@@ -84,6 +85,15 @@ ANON_SHORT = {
     "random_string": "string",
     "hex": "hex",
 }
+
+# PCA column-reduction modes for the run bar: off, an exact component count,
+# or a target share of variance to retain (labels stay short so the run bar
+# still fits an 80-120 column terminal)
+REDUCE_CHOICES = [
+    ("no reduction", "off"),
+    ("N components", "components"),
+    ("variance ≥ R", "variance"),
+]
 
 
 @dataclass
@@ -353,6 +363,9 @@ class ColumnsScreen(Screen):
             yield Input("", placeholder="—", id="seed", classes="run-input-s")
             yield Label("random", classes="run-label")
             yield Switch(value=False, id="random")
+            yield Label("reduce", classes="run-label")
+            yield Select(REDUCE_CHOICES, value="off", allow_blank=False, id="reduce-mode")
+            yield Input("", placeholder="—", id="reduce-value")
             yield Button("▶ run sample", id="run", variant="success")
         yield Footer()
 
@@ -634,6 +647,33 @@ class ColumnsScreen(Screen):
             return
         outdir = self.query_one("#outdir", Input).value.strip() or None
         use_random = self.query_one("#random", Switch).value
+        reduce_mode = self.query_one("#reduce-mode", Select).value
+        reduce_value = self.query_one("#reduce-value", Input).value.strip()
+        reduce_kwargs: dict | None = None
+        if reduce_mode == "components":
+            try:
+                n = int(reduce_value)
+                if n < 1:
+                    raise ValueError
+            except ValueError:
+                self.notify(
+                    "reduce: component count must be a positive integer",
+                    severity="error",
+                )
+                return
+            reduce_kwargs = {"n_components": n}
+        elif reduce_mode == "variance":
+            try:
+                r = float(reduce_value)
+                if not 0.0 < r < 1.0:
+                    raise ValueError
+            except ValueError:
+                self.notify(
+                    "reduce: variance ratio must be between 0 and 1 (e.g. 0.9)",
+                    severity="error",
+                )
+                return
+            reduce_kwargs = {"variance_ratio": r}
         exclude = [c for c, cfg in self.configs.items() if cfg.skip_strat]
         try:
             spec = {
@@ -648,12 +688,16 @@ class ColumnsScreen(Screen):
         self.query_one("#run", Button).disabled = True
         self.notify("sampling…", timeout=2)
         self.run_worker(
-            lambda: self._do_run(count, use_random, exclude, spec, seed, outdir),
+            lambda: self._do_run(
+                count, use_random, exclude, spec, seed, outdir, reduce_kwargs
+            ),
             thread=True,
             exclusive=True,
         )
 
-    def _do_run(self, count, use_random, exclude, spec, seed, outdir) -> None:
+    def _do_run(
+        self, count, use_random, exclude, spec, seed, outdir, reduce_kwargs=None
+    ) -> None:
         app: DataSamplerApp = self.app  # type: ignore[assignment]
         try:
             from ..anonymize import anonymize
@@ -670,7 +714,19 @@ class ColumnsScreen(Screen):
             data = result.data
             if spec:
                 data = anonymize(data, spec, seed=seed)
-            tag = f"sample_{count}" + ("_anon" if spec else "")
+            reduction = None
+            if reduce_kwargs:
+                reduction = reduce_columns(data, seed=seed, **reduce_kwargs)
+                data = reduction.data
+            tag = (
+                f"sample_{count}"
+                + ("_anon" if spec else "")
+                + (
+                    f"_pca{reduction.n_components}"
+                    if reduction is not None and reduction.n_components
+                    else ""
+                )
+            )
             out_path = save_output(data, app.source_path, tag, output_folder=outdir)
 
             lines = list(result.notes)
@@ -685,6 +741,9 @@ class ColumnsScreen(Screen):
                 lines.append("ANONYMIZED COLUMNS")
                 for col in spec:
                     lines.append(f"  {col}  →  {anon_label(self.configs[col])}")
+            if reduction is not None:
+                lines.append("")
+                lines.append(format_reduction_report(reduction))
             lines.append("")
             lines.append(f"Sampled {len(data)} rows.")
             lines.append(f"Output saved to: {out_path}")
@@ -873,6 +932,8 @@ class DataSamplerApp(App):
     .run-input-s {{ width: 12; }}
     .run-input-l {{ width: 1fr; }}
     #random {{ margin-top: 0; }}
+    #reduce-mode {{ width: 20; }}
+    #reduce-value {{ width: 8; }}
     #run {{ margin-left: 2; }}
 
     /* report screen */
