@@ -365,8 +365,13 @@ are left alone so the categories you stratify on survive).
 
 **Stratified (default):** columns suitable for stratification are detected
 automatically — categorical or low-cardinality columns with 2–100 unique
-values; long text and ID-like numeric columns are avoided, as are any
-columns you mark as skipped. Rows are grouped by the joint combination of
+values; long text, ID-like numeric, and continuous numeric columns (any
+fractional values — prices, rates, measurements) are avoided, as are any
+columns you mark as skipped. The continuous check looks at values, not
+storage types: parquet DECIMAL and float-backed categorical columns count
+too. Whole-number numeric columns (ratings, counts — including floats that
+hold only whole numbers) remain candidates. Rows are grouped by the joint
+combination of
 all selected columns and sampled proportionally per group, so the sample
 mirrors the original joint distribution. Missing values count as their own
 category. A side-by-side distribution report is produced for every run.

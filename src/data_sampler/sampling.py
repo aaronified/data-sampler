@@ -40,9 +40,10 @@ def find_stratification_columns(
     """Pick columns suitable for stratification.
 
     Candidates are categorical / low-cardinality columns with 2–100 unique
-    values; long text and ID-like numeric columns are skipped. Columns listed
-    in ``exclude`` are never considered (the user's "skip" selections). The
-    final set is pruned so the intersection-group count fits ``sample_count``.
+    values; long text, ID-like numeric, and continuous numeric columns
+    (fractional values) are skipped. Columns listed in ``exclude`` are never
+    considered (the user's "skip" selections). The final set is pruned so the
+    intersection-group count fits ``sample_count``.
     """
     exclude = set(exclude)
     candidates = []

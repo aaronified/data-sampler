@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numbers
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -81,6 +82,47 @@ def sparkline(counts: list[int]) -> str:
     return "".join(out)
 
 
+def _fractionable_values(series: pd.Series) -> np.ndarray | None:
+    """Unique non-null OBSERVED values as float64 for columns whose
+    representation can hold fractional numbers — float dtypes (numpy,
+    nullable, or Arrow-backed), decimal extension dtypes (Arrow decimal128
+    from ``read_parquet(dtype_backend='pyarrow')``), float-backed
+    categoricals, and object columns of floats/Decimals (how parquet DECIMAL
+    and SQL drivers arrive by default). None for everything else (ints,
+    bools, strings, dates): those can never be continuous. Mirrors which
+    DuckDB types get the engine-side probe
+    (:func:`data_sampler.engine._duckdb_can_be_fractional`), and rules on
+    observed values — not declared categories — because that is all the
+    engine ever sees, so both paths reach the same verdict. Callers gate on
+    cardinality first — the returned array is only ever unique values, so it
+    stays small.
+    """
+    non_null = series.dropna()
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        if not pd.api.types.is_float_dtype(series.cat.categories.dtype):
+            return None
+        return np.asarray(non_null.unique(), dtype=float)
+    if (
+        pd.api.types.is_numeric_dtype(series)
+        and not pd.api.types.is_integer_dtype(series)
+        and not pd.api.types.is_bool_dtype(series)
+        and not pd.api.types.is_complex_dtype(series)
+    ):
+        try:
+            return np.asarray(non_null.unique(), dtype=float)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if series.dtype == object:
+        uniq = non_null.unique()
+        if len(uniq) == 0 or not all(isinstance(v, numbers.Number) for v in uniq):
+            return None
+        try:
+            return np.array([float(v) for v in uniq], dtype=float)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return None
+
+
 def is_stratifiable(series: pd.Series, n_rows: int, n_unique: int | None = None) -> bool:
     """Whether a column passes the auto-stratification candidate checks.
 
@@ -99,6 +141,18 @@ def is_stratifiable(series: pd.Series, n_rows: int, n_unique: int | None = None)
             return False
     if pd.api.types.is_numeric_dtype(series):
         if n_unique > min(20, n_rows * 0.3):
+            return False
+    # continuous columns (fractional values — prices, rates, measurements)
+    # make poor strata even at low cardinality: skip them by default. The
+    # check is value-based, not dtype-based, so parquet DECIMAL (object of
+    # decimal.Decimal) and float-backed categorical columns rule the same way
+    # the DuckDB engine's probe does. Whole-number floats stay candidates —
+    # integer-coded columns (ratings, counts) usually arrive as float64 once
+    # NaNs appear.
+    vals = _fractionable_values(series)
+    if vals is not None:
+        finite = vals[np.isfinite(vals)]
+        if finite.size and not np.all(finite == np.round(finite)):
             return False
     return True
 

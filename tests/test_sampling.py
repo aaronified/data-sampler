@@ -53,6 +53,16 @@ def test_exclude_columns_are_not_stratified(demo_df):
     assert "active" not in result.strat_cols
 
 
+def test_continuous_numeric_not_auto_selected(demo_df):
+    # 4 unique values would pass the cardinality gate, but the fractional
+    # values mark the column as continuous → skipped by default
+    df = demo_df.copy()
+    df["price"] = np.tile([9.99, 19.99, 29.99, 39.99], len(df) // 4)
+    cols = find_stratification_columns(df, 400)
+    assert "price" not in cols
+    assert "region" in cols  # the categorical candidates are unaffected
+
+
 def test_exclude_all_falls_back_to_random(demo_df):
     result = sample(
         demo_df, 100, exclude_columns=list(demo_df.columns), random_state=3

@@ -1,5 +1,35 @@
 # Changelog
 
+## v3.5.2 — 2026-07-24
+
+- **Continuous numeric columns are skipped by auto-stratification.** A numeric
+  column with any fractional values (prices, rates, measurements) is no longer
+  a stratification candidate, even at low cardinality — sampling proportionally
+  over arbitrary points on a continuum doesn't preserve anything meaningful.
+  Whole-number columns (ratings, counts — including float columns that hold
+  only whole numbers, the usual dtype once NaNs appear) remain candidates. The
+  rule applies uniformly to the pandas path (`is_stratifiable`), the DuckDB
+  engine (`find_stratification_columns` and the `stratifiable` stats flag, via
+  a same-pass `bool_or(x <> trunc(x))` probe on float-typed columns), and
+  therefore to the TUI's strat column display. Explicit `strat_cols=` still
+  forces any column.
+- **The rule is value-based, not dtype-based**, so both paths reach the same
+  verdict on every representation of the same numbers: parquet DECIMAL columns
+  (object-of-`Decimal` after `read_parquet`, or Arrow-backed decimal under
+  `dtype_backend='pyarrow'`), float-backed categorical columns (judged on
+  observed values — unused categories left behind by row filtering don't
+  count, matching what DuckDB registration sees), and object columns of
+  floats all count as continuous when their values are fractional. Caught by
+  pre-release adversarial review — the initial dtype-gated pandas check let a
+  DECIMAL parquet file stratify differently depending on whether the DuckDB
+  engine handled it.
+- **Fixed: `engine.stats()` crashed with `STDDEV_SAMP is out of range` on any
+  numeric column containing ±inf** (pre-existing since the engine shipped in
+  v3.2). The shared aggregate filter now keeps only finite values — as its own
+  comment always promised — instead of filtering just NaN.
+- The TUI's "not a stratification candidate" hint now lists continuous values
+  among the possible reasons.
+
 ## v3.5.1 — 2026-07-24
 
 - **The "skip from reduction (PCA)" toggle is hidden for non-numeric columns.**

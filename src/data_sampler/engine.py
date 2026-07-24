@@ -122,6 +122,15 @@ def _duckdb_kind(dtype: str) -> str:
     return "other"
 
 
+def _duckdb_can_be_fractional(dtype: str) -> bool:
+    """Whether a scalar DuckDB numeric type can hold fractional values.
+
+    Integer types cannot, so the continuous-column probe (a value scan) is
+    skipped for them.
+    """
+    return dtype.lower().startswith(("decimal", "double", "float", "real", "numeric"))
+
+
 def _proportional_allocation(sizes: np.ndarray, count: int) -> np.ndarray:
     """Largest-remainder proportional allocation summing exactly to ``count``.
 
@@ -295,29 +304,42 @@ class DuckDBEngine:
         # classify via _duckdb_kind so type rules match stats() (and never
         # match INTERVAL against the "int" numeric prefix)
         cols = [
-            (r[0], _duckdb_kind(str(r[1]))) for r in info if r[0] not in exclude
+            (r[0], _duckdb_kind(str(r[1])), str(r[1]))
+            for r in info
+            if r[0] not in exclude
         ]
         if not cols:
             return []
 
         # one pass: approx distinct per column (HLL) + avg text length for
-        # string-ish columns (VARCHAR and ENUM both take this rule)
+        # string-ish columns (VARCHAR and ENUM both take this rule) + a
+        # fractional-values probe for float-typed columns (continuous columns
+        # are skipped as strata, mirroring stats.is_stratifiable)
         parts = []
-        for name, kind in cols:
+        for name, kind, dtype in cols:
             q = _quote_ident(name)
             parts.append(f"approx_count_distinct({q}) AS {_quote_ident(name + '::nd')}")
             if kind == "categorical":
                 parts.append(
                     f"avg(length(CAST({q} AS VARCHAR))) AS {_quote_ident(name + '::len')}"
                 )
+            elif kind == "numeric" and _duckdb_can_be_fractional(dtype):
+                parts.append(
+                    f"bool_or({q}::DOUBLE <> trunc({q}::DOUBLE)) "
+                    f"FILTER (WHERE isfinite({q}::DOUBLE)) "
+                    f"AS {_quote_ident(name + '::frac')}"
+                )
         row = self.con.execute(f"SELECT {', '.join(parts)} FROM {src}").fetchdf().iloc[0]
 
         candidates: list[tuple[str, int]] = []
-        for name, kind in cols:
+        for name, kind, _dtype in cols:
             n_unique = int(row[name + "::nd"] or 0)
             if n_unique < 2 or n_unique > min(100, n_rows * 0.5):
                 continue
             if kind == "numeric" and n_unique > min(20, n_rows * 0.3):
+                continue
+            frac = row.get(name + "::frac")
+            if frac is not None and pd.notna(frac) and bool(frac):
                 continue
             if (name + "::len") in row and (row[name + "::len"] or 0) > 50:
                 continue
@@ -384,9 +406,9 @@ class DuckDBEngine:
             )
             if kind == "numeric":
                 # NaN is a VALUE to DuckDB, not NULL: unfiltered, it poisons
-                # min/max and makes stddev_samp raise "out of range" — filter
-                # every NaN-sensitive aggregate down to finite values
-                fin = f"FILTER (WHERE NOT isnan({q}::DOUBLE))"
+                # min/max; and ±inf makes stddev_samp raise "out of range" —
+                # filter every sensitive aggregate down to finite values
+                fin = f"FILTER (WHERE isfinite({q}::DOUBLE))"
                 parts += [
                     f"min({q}::DOUBLE) {fin} AS {a}_min",
                     f"max({q}::DOUBLE) {fin} AS {a}_max",
@@ -395,6 +417,10 @@ class DuckDBEngine:
                     (f"approx_quantile({q}::DOUBLE, 0.5)" if approximate
                      else f"quantile_cont({q}::DOUBLE, 0.5)") + f" {fin} AS {a}_med",
                 ]
+                if _duckdb_can_be_fractional(col_types[c]):
+                    parts.append(
+                        f"bool_or({q}::DOUBLE <> trunc({q}::DOUBLE)) {fin} AS {a}_frac"
+                    )
             elif kind == "categorical":
                 parts.append(f"avg(length(CAST({q} AS VARCHAR))) AS {a}_len")
         row = con.execute(f"SELECT {', '.join(parts)} FROM {src}").fetchdf().iloc[0]
@@ -421,6 +447,9 @@ class DuckDBEngine:
             strat = 2 <= unique <= min(100, total * 0.5)
             if kind == "numeric" and unique > min(20, total * 0.3):
                 strat = False
+            frac = row.get(f"{a}_frac")
+            if pd.notna(frac) and bool(frac):
+                strat = False  # continuous (fractional-valued) numeric column
             if kind == "text":
                 strat = False
             cs.stratifiable = strat
@@ -445,12 +474,13 @@ class DuckDBEngine:
             width = hi - lo
             # equal-width bins via floor (width_bucket isn't available in
             # DuckDB); clamp to [0, bins-1] so the max value lands in the last
-            # bin, and drop NaN explicitly (NaN is a value, not NULL, in DuckDB)
+            # bin, and drop NaN/±inf explicitly (NaN is a value, not NULL, in
+            # DuckDB, and inf would overflow the INTEGER bin cast)
             rows = con.execute(
                 f"SELECT least({bins - 1}, greatest(0, CAST(floor("
                 f"({q}::DOUBLE - {lo!r}) / {width!r} * {bins}) AS INTEGER))) AS b, "
                 f"count(*) AS n FROM {src} "
-                f"WHERE {q} IS NOT NULL AND NOT isnan({q}::DOUBLE) GROUP BY b"
+                f"WHERE {q} IS NOT NULL AND isfinite({q}::DOUBLE) GROUP BY b"
             ).fetchall()
             counts = [0] * bins
             for b, n in rows:

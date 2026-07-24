@@ -135,6 +135,65 @@ def test_auto_stratification_picks_low_cardinality(engine, big_df):
     assert "id" not in cols and "note" not in cols
 
 
+def test_auto_stratification_skips_continuous_numeric(engine, big_df):
+    # low-cardinality but fractional-valued (continuous) → skipped by default;
+    # whole-number floats (integer codes stored as DOUBLE) stay candidates
+    df = big_df.copy()
+    df["price"] = np.tile([9.99, 19.99, 29.99, 39.99], len(df) // 4)
+    df["rating"] = np.tile([1.0, 2.0, 3.0, 4.0], len(df) // 4)
+    cols = engine.find_stratification_columns(df, 1000)
+    assert "price" not in cols
+    assert "rating" in cols
+
+
+def test_stats_stratifiable_flag_skips_continuous_numeric(engine, big_df):
+    df = big_df.copy()
+    df["price"] = np.tile([9.99, 19.99, 29.99, 39.99], len(df) // 4)
+    df["rating"] = np.tile([1.0, 2.0, 3.0, 4.0], len(df) // 4)
+    by_name = {s.name: s for s in engine.stats(df, columns=["price", "rating", "tier"])}
+    assert not by_name["price"].stratifiable
+    assert by_name["rating"].stratifiable
+    assert by_name["tier"].stratifiable
+
+
+def test_decimal_parquet_agrees_across_paths(tmp_path, engine):
+    # parquet DECIMAL loads as object-of-Decimal in pandas; both paths must
+    # exclude the fractional column and keep the categorical
+    p = str(tmp_path / "dec.parquet").replace("\\", "/")
+    engine.con.execute(
+        "COPY (SELECT CAST(9.99 + (i % 4) * 10 AS DECIMAL(6,2)) AS price, "
+        f"'g' || (i % 3) AS grp FROM range(1000) t(i)) TO '{p}' (FORMAT PARQUET)"
+    )
+    assert engine.find_stratification_columns(p, 200) == ["grp"]
+    from data_sampler.sampling import find_stratification_columns
+
+    assert find_stratification_columns(pd.read_parquet(p), 200) == ["grp"]
+
+
+def test_categorical_float_agrees_across_paths(engine):
+    # DuckDB registration flattens category-of-float to DOUBLE — the pandas
+    # path must reach the same verdict on the same DataFrame
+    df = pd.DataFrame(
+        {
+            "band": pd.Series([1.5, 2.5, 3.5, 4.5] * 250).astype("category"),
+            "grp": ["a", "b"] * 500,
+        }
+    )
+    assert engine.find_stratification_columns(df, 200) == ["grp"]
+    from data_sampler.sampling import find_stratification_columns
+
+    assert find_stratification_columns(df, 200) == ["grp"]
+
+
+def test_stats_handles_infinite_values(engine):
+    # ±inf passed the old NOT-isnan filter and blew up stddev_samp, crashing
+    # the whole Pass-A query; aggregates are finite-only now
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0, np.inf] * 250, "cat": ["a", "b"] * 500})
+    by_name = {s.name: s for s in engine.stats(df)}
+    assert by_name["x"].max == 3.0
+    assert by_name["cat"].stratifiable
+
+
 def test_sample_all_when_count_exceeds_rows(engine):
     small = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
     result = engine.sample(small, 10)

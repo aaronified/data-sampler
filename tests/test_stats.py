@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from data_sampler.stats import (
     ColumnStats,
@@ -89,6 +90,83 @@ def test_empty_dataframe():
 def test_single_value_column_not_stratifiable():
     series = pd.Series(["same"] * 50, name="const")
     assert not is_stratifiable(series, 50)
+
+
+def test_continuous_numeric_not_stratifiable():
+    # low cardinality but fractional values → continuous, skipped by default
+    series = pd.Series([9.99, 19.99, 29.99, 39.99] * 25, name="price")
+    assert not is_stratifiable(series, 100)
+
+
+def test_decimal_object_column_rules_like_the_engine():
+    # parquet DECIMAL / SQL drivers arrive as object-of-Decimal: the fractional
+    # rule is value-based, so these must rule identically to the DuckDB probe
+    from decimal import Decimal
+
+    frac = pd.Series(
+        [Decimal("9.99"), Decimal("19.99"), Decimal("29.99"), Decimal("39.99")] * 25,
+        name="price",
+    )
+    assert not is_stratifiable(frac, 100)
+    whole = pd.Series([Decimal("1"), Decimal("2"), Decimal("3")] * 34, name="code")
+    assert is_stratifiable(whole, 102)
+
+
+def test_float_backed_categorical_rules_like_the_engine():
+    # DuckDB registration flattens category-of-float to DOUBLE; the pandas
+    # side must rule on the category values the same way
+    frac = pd.Series([1.5, 2.5, 3.5, 4.5] * 25, name="band").astype("category")
+    assert not is_stratifiable(frac, 100)
+    whole = pd.Series([1.0, 2.0, 3.0, 4.0] * 25, name="code").astype("category")
+    assert is_stratifiable(whole, 100)
+
+
+def test_unused_fractional_category_ignored():
+    # row-filtering keeps unused categories around; the rule must judge
+    # observed values only — all the engine ever sees after registration
+    s = pd.Series(
+        pd.Categorical([1.0, 2.0] * 50, categories=[1.0, 2.0, 3.5]), name="band"
+    )
+    assert is_stratifiable(s, 100)
+
+
+def test_arrow_decimal_column_rules_like_the_engine():
+    # read_parquet(dtype_backend='pyarrow') yields ArrowDtype(decimal128) for
+    # parquet DECIMAL — same verdict as the engine's DECIMAL probe required
+    pa = pytest.importorskip("pyarrow")
+    from decimal import Decimal
+
+    frac = pd.Series(
+        [Decimal("9.99"), Decimal("19.99"), Decimal("29.99")] * 34,
+        dtype=pd.ArrowDtype(pa.decimal128(6, 2)),
+        name="price",
+    )
+    assert not is_stratifiable(frac, 102)
+    whole = pd.Series(
+        [Decimal("10"), Decimal("20"), Decimal("30")] * 34,
+        dtype=pd.ArrowDtype(pa.decimal128(6, 2)),
+        name="code",
+    )
+    assert is_stratifiable(whole, 102)
+
+
+def test_object_float_column_fractional_not_stratifiable():
+    frac = pd.Series([9.99, 19.99, 29.99, 39.99] * 25, dtype=object, name="price")
+    assert not is_stratifiable(frac, 100)
+    mixed = pd.Series(["a", "b", 1.5, 2.5] * 25, dtype=object, name="junk")
+    assert is_stratifiable(mixed, 100)  # not number-valued → old rules apply
+
+
+def test_whole_number_float_still_stratifiable():
+    # integer-coded columns arrive as float64 once NaNs appear — they stay
+    # candidates as long as every value is a whole number
+    series = pd.Series([1.0, 2.0, 3.0, np.nan] * 25, name="rating")
+    assert is_stratifiable(series, 100)
+
+
+def test_discrete_int_column_stratifiable():
+    series = pd.Series([1, 2, 3, 4, 5] * 20, name="stars")
+    assert is_stratifiable(series, 100)
 
 
 def test_boolean_column_kind(demo_df):

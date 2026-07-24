@@ -826,7 +826,10 @@ class ColumnsScreen(Screen):
                 t.append(f" {count:,} ({count / total * 100:.1f}%)\n", style=DIM)
         if not s.stratifiable:
             t.append("\nnot a stratification candidate ", style=DIM)
-            t.append("(too many unique values, long text, or constant)", style=DIM)
+            t.append(
+                "(too many unique values, continuous values, long text, or constant)",
+                style=DIM,
+            )
         self.query_one("#detail", Static).update(t)
 
     # ── config panel sync ────────────────────────────────────────────────────
