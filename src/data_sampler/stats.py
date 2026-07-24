@@ -28,6 +28,9 @@ class ColumnStats:
     mean: float | None = None
     std: float | None = None
     median: float | None = None
+    # most frequent value: a float for numeric columns, a string otherwise
+    # (None when the column is empty). Populated for every kind.
+    mode: object | None = None
     # most frequent values as (value, count), up to 8
     top_values: list[tuple[str, int]] = field(default_factory=list)
     # distribution: 10-bin histogram counts for numeric, top-8 category counts otherwise
@@ -146,6 +149,8 @@ def compute_column_stats(series: pd.Series, n_rows: int | None = None) -> Column
         stats.mean = float(non_null.mean())
         stats.std = float(non_null.std()) if count > 1 else 0.0
         stats.median = float(non_null.median())
+        m = non_null.mode()
+        stats.mode = float(m.iloc[0]) if len(m) else None
         finite = non_null.astype(float)
         finite = finite[np.isfinite(finite)]
         if len(finite) > 0:
@@ -164,6 +169,8 @@ def compute_column_stats(series: pd.Series, n_rows: int | None = None) -> Column
         stats.top_values = [(str(v), int(c)) for v, c in vc.items()]
         stats.histogram = [int(c) for c in vc.values]
         stats.histogram_labels = [str(v) for v in vc.index]
+        # the most frequent category is the first entry of value_counts
+        stats.mode = stats.top_values[0][0] if stats.top_values else None
 
     return stats
 

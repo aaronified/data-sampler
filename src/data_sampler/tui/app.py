@@ -11,8 +11,10 @@ A panel-based, color-coded dashboard (in the spirit of btop / lazydocker):
 
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +23,8 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.coordinate import Coordinate
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -42,7 +46,7 @@ from ..io import load_file, save_output
 from ..reduce import reduce_columns
 from ..report import format_reduction_report, format_stratification_report
 from ..sampling import sample
-from ..stats import ColumnStats, compute_stats, sparkline
+from ..stats import ColumnStats, _fmt_num, compute_stats, sparkline
 
 log = get_logger(__name__)
 
@@ -98,11 +102,12 @@ REDUCE_CHOICES = [
 
 @dataclass
 class ColumnConfig:
-    """Per-column TUI state: chosen anonymizer + stratification skip."""
+    """Per-column TUI state: anonymizer + stratification / reduction skips."""
 
     kind: str = "none"
     options: dict[str, str] = field(default_factory=dict)
     skip_strat: bool = False
+    skip_reduce: bool = False
 
 
 def build_anonymizer(cfg: ColumnConfig):
@@ -156,13 +161,30 @@ def anon_label(cfg: ColumnConfig) -> str:
     return ANON_SHORT[cfg.kind]
 
 
+def _fmt_stat(x: object | None) -> str:
+    """Table-cell rendering for a single summary statistic.
+
+    Numbers go through the shared numeric formatter; a categorical mode (a
+    string) is shown verbatim but truncated so it can't blow out the column.
+    """
+    if x is None:
+        return "—"
+    if isinstance(x, (int, float)):
+        return _fmt_num(float(x))
+    s = str(x)
+    return s if len(s) <= 14 else s[:13] + "…"
+
+
 # ── screens ───────────────────────────────────────────────────────────────────
 
 
 class FileScreen(Screen):
     """Pick the source data file."""
 
-    BINDINGS = [Binding("ctrl+l", "load", "load file")]
+    BINDINGS = [
+        Binding("ctrl+l", "load", "load file"),
+        Binding("ctrl+r", "refresh_browser", "refresh browser"),
+    ]
 
     def __init__(self, path: str | None = None, sheet: str | None = None):
         super().__init__()
@@ -187,6 +209,7 @@ class FileScreen(Screen):
                 yield Button("▶ load", id="load", variant="success")
                 yield Static("", id="file-status")
             with Vertical(id="file-browser"):
+                yield Button("⟳ refresh", id="refresh-browser", classes="mini-btn")
                 yield DirectoryTree(str(Path.cwd()), id="browser")
         yield Footer()
 
@@ -210,6 +233,15 @@ class FileScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "load":
             self.action_load()
+        elif event.button.id == "refresh-browser":
+            self.action_refresh_browser()
+
+    def action_refresh_browser(self) -> None:
+        """Re-scan the working directory so files created since launch appear."""
+        self.query_one("#browser", DirectoryTree).reload()
+        self.query_one("#file-status", Static).update(
+            Text("↻ file browser refreshed", style=CYAN)
+        )
 
     def action_load(self) -> None:
         path = self.query_one("#path", Input).value.strip().strip('"').strip("'")
@@ -259,6 +291,49 @@ class FileScreen(Screen):
         app.push_screen(ColumnsScreen())
 
 
+class ColumnsDataTable(DataTable):
+    """DataTable that reports modifier-clicks so rows can be multi-selected.
+
+    Textual's DataTable turns any click into a plain cursor move. We keep that
+    behaviour for unmodified clicks, but a ctrl- or shift-click is intercepted
+    and re-emitted as :class:`ModifierClick` (after moving the cursor to the
+    clicked row) so the screen can toggle / range-select rows — the desktop
+    ctrl/shift-click idiom, in the terminal.
+    """
+
+    class ModifierClick(Message, namespace="columns_table"):
+        def __init__(self, row_key: str, ctrl: bool, shift: bool) -> None:
+            super().__init__()
+            self.row_key = row_key
+            self.ctrl = ctrl
+            self.shift = shift
+
+    async def _on_click(self, event) -> None:
+        if event.ctrl or event.shift:
+            meta = event.style.meta
+            if "row" in meta and "column" in meta:
+                row_index, column_index = meta["row"], meta["column"]
+                if row_index >= 0 and column_index >= 0:
+                    try:
+                        cell_key = self.coordinate_to_cell_key(
+                            Coordinate(row_index, column_index)
+                        )
+                    except Exception:
+                        cell_key = None
+                    if cell_key is not None and cell_key.row_key.value is not None:
+                        self.cursor_coordinate = Coordinate(row_index, column_index)
+                        self.post_message(
+                            self.ModifierClick(
+                                cell_key.row_key.value,
+                                bool(event.ctrl),
+                                bool(event.shift),
+                            )
+                        )
+                        event.stop()
+                        return
+        await super()._on_click(event)
+
+
 class ColumnsScreen(Screen):
     """Column stats dashboard + anonymizer / stratification configuration."""
 
@@ -266,6 +341,11 @@ class ColumnsScreen(Screen):
         Binding("ctrl+r", "run", "run sample"),
         Binding("a", "suggest", "auto-suggest types"),
         Binding("s", "toggle_skip", "toggle strat skip"),
+        Binding("d", "toggle_reduce_skip", "toggle reduce skip"),
+        Binding("space", "toggle_select", "select row"),
+        Binding("x", "clear_select", "clear selection"),
+        Binding("ctrl+z", "undo", "undo"),
+        Binding("ctrl+y", "redo", "redo"),
         Binding("escape", "back", "back to file"),
     ]
 
@@ -276,6 +356,17 @@ class ColumnsScreen(Screen):
         self.selected: str | None = None
         self._syncing = False
         self._col_keys: list = []
+        # rows explicitly multi-selected (via ctrl/shift-click or space); bulk
+        # config edits apply to these plus the cursor row. Kept separate from
+        # the DataTable's single-row cursor.
+        self.selection: set[str] = set()
+        self._anchor: str | None = None
+        # config-only undo/redo (deep-copied snapshots of self.configs). The
+        # brief asks for ≥10 steps; a generous cap keeps the memory bounded.
+        self._undo: deque[dict[str, ColumnConfig]] = deque(maxlen=100)
+        self._redo: deque[dict[str, ColumnConfig]] = deque(maxlen=100)
+        # coalesces bursts of edits on one field into a single undo step
+        self._last_coalesce_key: object | None = None
 
     # ── layout ────────────────────────────────────────────────────────────────
 
@@ -290,7 +381,7 @@ class ColumnsScreen(Screen):
         )
         with Horizontal(id="main"):
             with Container(id="columns-panel"):
-                yield DataTable(id="columns-table")
+                yield ColumnsDataTable(id="columns-table")
             with Vertical(id="side"):
                 with VerticalScroll(id="detail-panel"):
                     yield Static("", id="detail")
@@ -354,6 +445,9 @@ class ColumnsScreen(Screen):
                     with Horizontal(id="skip-row"):
                         yield Switch(value=False, id="skip-strat")
                         yield Label("skip when stratifying", id="skip-label")
+                    with Horizontal(id="reduce-skip-row"):
+                        yield Switch(value=False, id="skip-reduce")
+                        yield Label("skip from reduction (PCA)", id="reduce-skip-label")
         with Horizontal(id="runbar"):
             yield Label("rows", classes="run-label")
             yield Input("100", id="count", classes="run-input-s")
@@ -373,7 +467,7 @@ class ColumnsScreen(Screen):
         app: DataSamplerApp = self.app  # type: ignore[assignment]
         self.query_one("#columns-panel").border_title = "columns"
         self.query_one("#detail-panel").border_title = "detail"
-        self.query_one("#config-panel").border_title = "anonymize · stratify"
+        self.query_one("#config-panel").border_title = "anonymize · stratify · reduce"
         self.query_one("#runbar").border_title = "sample"
 
         df = app.df
@@ -386,12 +480,14 @@ class ColumnsScreen(Screen):
         table = self.query_one("#columns-table", DataTable)
         table.cursor_type = "row"
         table.zebra_stripes = True
-        # actionable columns (anonymizer, strat) come right after type so they
-        # stay visible; the wider distribution/summary columns trail them
+        # actionable columns (anonymizer, strat, reduce) come right after type
+        # so they stay visible; the wider distribution and the per-stat summary
+        # columns (mean / median / mode / sd) trail them
         self._col_keys = list(
             table.add_columns(
-                "column", "type", "anonymizer", "strat",
-                "miss%", "uniq", "distribution", "summary",
+                "column", "type", "anonymizer", "strat", "reduce",
+                "miss%", "uniq", "distribution",
+                "mean", "median", "mode", "sd",
             )
         )
         for name in self.configs:
@@ -414,21 +510,49 @@ class ColumnsScreen(Screen):
             strat = Text("✓ auto", style=GREEN)
         else:
             strat = Text("—", style=DIM)
+        # reduction only ever touches numeric columns, so the skip state is
+        # only meaningful (and only shown) for them — a skip flag on a
+        # non-numeric column has no effect and must not claim otherwise
+        if s.kind != "numeric":
+            reduce_cell = Text("—", style=DIM)
+        elif cfg.skip_reduce:
+            reduce_cell = Text("✗ skip", style=RED)
+        else:
+            reduce_cell = Text("◇ pca", style=CYAN)
+        selected = name in self.selection
+        marker = "▌ " if selected else "  "
+        name_cell = Text(marker + name, style=f"bold {YELLOW if selected else FG}")
+        # mean / median / sd are numeric-only; mode applies to every kind
+        num = s.kind == "numeric"
         return [
-            Text(name, style=f"bold {FG}"),
+            name_cell,
             Text(s.kind, style=color),
             Text(anon_label(cfg), style=GREEN if cfg.kind != "none" else DIM),
             strat,
+            reduce_cell,
             Text(f"{s.missing_pct:.1f}", style=miss_style, justify="right"),
             Text(f"{s.unique:,}", style=FG, justify="right"),
             Text(sparkline(s.histogram), style=color),
-            Text(s.summary(), style=DIM),
+            Text(_fmt_stat(s.mean) if num else "—", style=CYAN if num else DIM, justify="right"),
+            Text(_fmt_stat(s.median) if num else "—", style=CYAN if num else DIM, justify="right"),
+            Text(_fmt_stat(s.mode), style=FG if s.mode is not None else DIM, justify="right"),
+            Text(_fmt_stat(s.std) if num else "—", style=CYAN if num else DIM, justify="right"),
         ]
 
     def _refresh_row(self, name: str) -> None:
         table = self.query_one("#columns-table", DataTable)
         for col_key, cell in zip(self._col_keys, self._row_cells(name)):
             table.update_cell(name, col_key, cell)
+
+    def _refresh_all_rows(self) -> None:
+        for name in self.configs:
+            self._refresh_row(name)
+
+    def _update_selection_status(self) -> None:
+        """Reflect the multi-selection count in the columns-panel title."""
+        n = len(self.selection)
+        title = f"columns — {n} selected (edits apply to all)" if n else "columns"
+        self.query_one("#columns-panel").border_title = title
 
     # ── detail panel ─────────────────────────────────────────────────────────
 
@@ -522,6 +646,9 @@ class ColumnsScreen(Screen):
             skip = self.query_one("#skip-strat", Switch)
             if skip.value != cfg.skip_strat:
                 skip.value = cfg.skip_strat
+            skip_reduce = self.query_one("#skip-reduce", Switch)
+            if skip_reduce.value != cfg.skip_reduce:
+                skip_reduce.value = cfg.skip_reduce
         finally:
             self._syncing = False
 
@@ -554,30 +681,147 @@ class ColumnsScreen(Screen):
         """
         return str(event_value) != str(widget_value)
 
+    # ── multi-selection + undo/redo ───────────────────────────────────────────
+
+    def _targets(self) -> list[str]:
+        """Columns a config edit applies to, in df order.
+
+        When a multi-selection exists it is the exact target set (so a row
+        toggled *off* is never edited, even while it is the cursor row);
+        otherwise it falls back to just the cursor row.
+        """
+        if self.selection:
+            return [c for c in self.configs if c in self.selection]
+        if self.selected is not None:
+            return [self.selected]
+        return []
+
+    def _snapshot(self) -> dict[str, ColumnConfig]:
+        return {c: copy.deepcopy(cfg) for c, cfg in self.configs.items()}
+
+    def _checkpoint(self, coalesce_key: object | None = None) -> None:
+        """Push the current config onto the undo stack before a mutation.
+
+        ``coalesce_key`` folds a burst of edits to one field (e.g. typing in an
+        option box) into a single undo step: consecutive checkpoints sharing a
+        non-None key are skipped, so the first snapshot of the burst is the one
+        undo restores. Any structural change passes ``None`` and always records.
+        """
+        if coalesce_key is not None and coalesce_key == self._last_coalesce_key:
+            return
+        self._undo.append(self._snapshot())
+        self._redo.clear()
+        self._last_coalesce_key = coalesce_key
+
+    def _restore(self, configs: dict[str, ColumnConfig]) -> None:
+        self.configs = configs
+        self._last_coalesce_key = None
+        self._refresh_all_rows()
+        if self.selected is not None:
+            self._sync_config_panel(self.selected)
+
+    def action_undo(self) -> None:
+        if not self._undo:
+            self.notify("nothing to undo", timeout=2)
+            return
+        self._redo.append(self._snapshot())
+        self._restore(self._undo.pop())
+        self.notify("undo", timeout=1)
+
+    def action_redo(self) -> None:
+        if not self._redo:
+            self.notify("nothing to redo", timeout=2)
+            return
+        self._undo.append(self._snapshot())
+        self._restore(self._redo.pop())
+        self.notify("redo", timeout=1)
+
+    def _toggle_in_selection(self, name: str) -> None:
+        if name in self.selection:
+            self.selection.discard(name)
+        else:
+            self.selection.add(name)
+        self._anchor = name
+
+    def on_columns_table_modifier_click(
+        self, event: ColumnsDataTable.ModifierClick
+    ) -> None:
+        name = event.row_key
+        if name not in self.configs:
+            return
+        if event.shift and self._anchor in self.configs:
+            names = list(self.configs)
+            i, j = names.index(self._anchor), names.index(name)
+            lo, hi = (i, j) if i <= j else (j, i)
+            self.selection = set(names[lo : hi + 1])
+        elif event.ctrl:
+            self._toggle_in_selection(name)
+        else:  # shift-click without an anchor: start a fresh selection here
+            self.selection = {name}
+            self._anchor = name
+        self._refresh_all_rows()
+        self._update_selection_status()
+
+    def action_toggle_select(self) -> None:
+        """Keyboard equivalent of ctrl-click: toggle the cursor row."""
+        if self.selected is None:
+            return
+        self._toggle_in_selection(self.selected)
+        self._refresh_all_rows()
+        self._update_selection_status()
+
+    def action_clear_select(self) -> None:
+        if not self.selection:
+            return
+        self.selection.clear()
+        self._anchor = None
+        self._refresh_all_rows()
+        self._update_selection_status()
+
+    # ── config edits (apply to every target column) ───────────────────────────
+
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing or self.selected is None:
             return
         if self._is_stale(event.value, event.select.value):
             return
-        cfg = self.configs[self.selected]
+        sel = self.configs[self.selected]
         if event.select.id == "anon-kind":
-            if str(event.value) == cfg.kind:
+            new_kind = str(event.value)
+            if new_kind == sel.kind:
                 return  # spurious/echoed change; keep existing options
-            cfg.kind = str(event.value)
-            cfg.options = {}
-            self.query_one("#anon-options", ContentSwitcher).current = f"opts-{cfg.kind}"
-            self._refresh_row(self.selected)
+            self._checkpoint()
+            for c in self._targets():
+                cfg = self.configs[c]
+                cfg.kind = new_kind
+                cfg.options = {}
+                self._refresh_row(c)
+            self.query_one("#anon-options", ContentSwitcher).current = f"opts-{new_kind}"
         elif event.select.id == "opt-names-style":
-            cfg.options["style"] = str(event.value)
+            style = str(event.value)
+            if sel.kind != "names" or sel.options.get("style", "first_last") == style:
+                return
+            targets = self._targets()
+            self._checkpoint(coalesce_key=(tuple(targets), "opt:names-style"))
+            for c in targets:
+                if self.configs[c].kind == "names":
+                    self.configs[c].options["style"] = style
+                    self._refresh_row(c)
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id == "skip-strat":
-            if self._syncing or self.selected is None:
-                return
-            if self._is_stale(event.value, event.switch.value):
-                return
-            self.configs[self.selected].skip_strat = event.value
-            self._refresh_row(self.selected)
+        if event.switch.id not in ("skip-strat", "skip-reduce"):
+            return  # ignore the run bar's #random switch
+        if self._syncing or self.selected is None:
+            return
+        if self._is_stale(event.value, event.switch.value):
+            return
+        attr = "skip_strat" if event.switch.id == "skip-strat" else "skip_reduce"
+        if getattr(self.configs[self.selected], attr) == event.value:
+            return  # echo / no-op for the shown row
+        self._checkpoint()
+        for c in self._targets():
+            setattr(self.configs[c], attr, event.value)
+            self._refresh_row(c)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing or self.selected is None:
@@ -586,42 +830,69 @@ class ColumnsScreen(Screen):
             return
         mapping = self._OPT_IDS.get(event.input.id or "")
         if mapping is None:
-            return
+            return  # a run-bar input (count/seed/…), not an anonymizer option
         kind, opt = mapping
-        cfg = self.configs[self.selected]
-        if cfg.kind == kind:
-            cfg.options[opt] = event.value
-            self._refresh_row(self.selected)
+        sel = self.configs[self.selected]
+        default = self._OPT_DEFAULTS[event.input.id]
+        if sel.kind != kind or str(sel.options.get(opt, default)) == str(event.value):
+            return  # panel not on this kind, or an idempotent sync echo
+        targets = self._targets()
+        # the coalesce key includes the target set, so a burst of edits to the
+        # same field on the same columns folds into one undo step — but editing
+        # the same field on a *different* column (after moving the cursor) does
+        # not, and stays a separate, recoverable step
+        self._checkpoint(coalesce_key=(tuple(targets), f"opt:{event.input.id}"))
+        for c in targets:
+            cfg = self.configs[c]
+            if cfg.kind == kind:
+                cfg.options[opt] = event.value
+                self._refresh_row(c)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "run":
             self.action_run()
 
     def action_toggle_skip(self) -> None:
-        if self.selected is None:
+        self._bulk_toggle("skip_strat")
+
+    def action_toggle_reduce_skip(self) -> None:
+        self._bulk_toggle("skip_reduce")
+
+    def _bulk_toggle(self, attr: str) -> None:
+        """Flip a boolean config flag on every target column (keyed off the
+        first target's current value so the whole set moves together)."""
+        targets = self._targets()
+        if not targets:
             return
-        cfg = self.configs[self.selected]
-        cfg.skip_strat = not cfg.skip_strat
-        self._sync_config_panel(self.selected)
-        self._refresh_row(self.selected)
+        self._checkpoint()
+        new_value = not getattr(self.configs[targets[0]], attr)
+        for c in targets:
+            setattr(self.configs[c], attr, new_value)
+            self._refresh_row(c)
+        if self.selected is not None:
+            self._sync_config_panel(self.selected)
 
     def action_suggest(self) -> None:
         """Auto-assign a suggested anonymizer type to every column."""
         from ..workflow import suggest_type
 
-        changed = 0
-        for name, stats in self.stats.items():
-            kind = suggest_type(stats)
+        planned = {name: suggest_type(stats) for name, stats in self.stats.items()}
+        to_change = [n for n, k in planned.items() if self.configs[n].kind != k]
+        # only record an undo step when something actually changes, so pressing
+        # 'a' on an already-suggested frame doesn't push a phantom step or wipe
+        # the redo history
+        if to_change:
+            self._checkpoint()
+        for name, kind in planned.items():
             cfg = self.configs[name]
             if cfg.kind != kind:
                 cfg.kind = kind
                 cfg.options = {}
-                changed += 1
             self._refresh_row(name)
         if self.selected is not None:
             self._sync_config_panel(self.selected)
         self.notify(
-            f"suggested anonymizer types ({changed} column(s) changed)",
+            f"suggested anonymizer types ({len(to_change)} column(s) changed)",
             timeout=3,
         )
 
@@ -675,6 +946,12 @@ class ColumnsScreen(Screen):
                 return
             reduce_kwargs = {"variance_ratio": r}
         exclude = [c for c, cfg in self.configs.items() if cfg.skip_strat]
+        # only numeric columns are reduction candidates, so a skip flag on any
+        # other kind is a no-op — keep it out of the exclude list and report
+        reduce_exclude = [
+            c for c, cfg in self.configs.items()
+            if cfg.skip_reduce and self.stats[c].kind == "numeric"
+        ]
         try:
             spec = {
                 c: build_anonymizer(cfg)
@@ -689,14 +966,16 @@ class ColumnsScreen(Screen):
         self.notify("sampling…", timeout=2)
         self.run_worker(
             lambda: self._do_run(
-                count, use_random, exclude, spec, seed, outdir, reduce_kwargs
+                count, use_random, exclude, spec, seed, outdir,
+                reduce_kwargs, reduce_exclude,
             ),
             thread=True,
             exclusive=True,
         )
 
     def _do_run(
-        self, count, use_random, exclude, spec, seed, outdir, reduce_kwargs=None
+        self, count, use_random, exclude, spec, seed, outdir,
+        reduce_kwargs=None, reduce_exclude=(),
     ) -> None:
         app: DataSamplerApp = self.app  # type: ignore[assignment]
         try:
@@ -716,7 +995,9 @@ class ColumnsScreen(Screen):
                 data = anonymize(data, spec, seed=seed)
             reduction = None
             if reduce_kwargs:
-                reduction = reduce_columns(data, seed=seed, **reduce_kwargs)
+                reduction = reduce_columns(
+                    data, seed=seed, exclude=reduce_exclude, **reduce_kwargs
+                )
                 data = reduction.data
             tag = (
                 f"sample_{count}"
@@ -743,6 +1024,11 @@ class ColumnsScreen(Screen):
                     lines.append(f"  {col}  →  {anon_label(self.configs[col])}")
             if reduction is not None:
                 lines.append("")
+                if reduce_exclude:
+                    lines.append(
+                        "Columns excluded from reduction: "
+                        + ", ".join(reduce_exclude)
+                    )
                 lines.append(format_reduction_report(reduction))
             lines.append("")
             lines.append(f"Sampled {len(data)} rows.")
@@ -769,6 +1055,7 @@ class ReportScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "back", "back to columns"),
+        Binding("ctrl+s", "save_text", "save report .txt"),
         Binding("n", "new_file", "new file"),
     ]
 
@@ -789,7 +1076,9 @@ class ReportScreen(Screen):
                 yield Static(self._build_histograms(), id="hist-text")
         with Horizontal(id="report-actions"):
             yield Button("◀ back (esc)", id="back")
+            yield Button("💾 save .txt (ctrl+s)", id="save-text", variant="success")
             yield Button("new file (n)", id="new-file", variant="primary")
+            yield Static("", id="save-status")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -827,11 +1116,56 @@ class ReportScreen(Screen):
                 t.append(f"{m_pct:4.0f}%\n", style=DIM)
         return t
 
+    def _histograms_text(self) -> str:
+        """Plain-text (no color markup) render of the column histograms, for
+        the saved report file."""
+        if not self._hist_data:
+            return "no columns to chart"
+        bar = self.HIST_BAR
+        lines = ["COLUMN DISTRIBUTIONS (source vs sample, % of non-null values)"]
+        for d in self._hist_data:
+            labels = d["labels"]
+            if not labels:
+                continue
+            label_w = min(16, max(len(l) for l in labels))
+            peak = max([*d["source_pct"], *d["sample_pct"], 1e-9])
+            lines.append(f"\n{d['name']} ({d['kind']})")
+            for label, s_pct, m_pct in zip(labels, d["source_pct"], d["sample_pct"]):
+                lbl = label if len(label) <= label_w else label[: label_w - 1] + "…"
+                s_len = int(s_pct / peak * bar)
+                m_len = int(m_pct / peak * bar)
+                lines.append(
+                    f"  {lbl:>{label_w}}  src {'█' * s_len}{'░' * (bar - s_len)} "
+                    f"{s_pct:5.1f}%   sam {'█' * m_len}{'░' * (bar - m_len)} {m_pct:5.1f}%"
+                )
+        return "\n".join(lines)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back":
             self.action_back()
+        elif event.button.id == "save-text":
+            self.action_save_text()
         elif event.button.id == "new-file":
             self.action_new_file()
+
+    def action_save_text(self) -> None:
+        """Write the report and column histograms to a .txt beside the sample."""
+        try:
+            out = Path(self._out_path)
+            txt_path = out.with_name(f"{out.stem}_report.txt")
+            content = self._report + "\n\n" + self._histograms_text() + "\n"
+            txt_path.write_text(content, encoding="utf-8")
+        except Exception as exc:  # surfaced to the user, never crash the TUI
+            log.exception("save report failed")
+            self.query_one("#save-status", Static).update(
+                Text(f"✗ save failed: {exc}", style=RED)
+            )
+            self.notify(f"save failed: {exc}", severity="error", timeout=8)
+            return
+        self.query_one("#save-status", Static).update(
+            Text(f"✓ saved {txt_path.name}", style=GREEN)
+        )
+        self.notify(f"saved report to {txt_path}", timeout=5)
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -880,7 +1214,8 @@ class DataSamplerApp(App):
         border: round {MAGENTA};
         border-title-color: {MAGENTA};
     }}
-    #browser {{ background: transparent; }}
+    #browser {{ background: transparent; height: 1fr; }}
+    #refresh-browser {{ width: auto; height: 3; margin: 0 1; }}
     #file-status {{ margin-top: 1; }}
     #load {{ margin-top: 1; }}
     .field-label {{ color: {DIM}; margin-top: 1; }}
@@ -920,6 +1255,8 @@ class DataSamplerApp(App):
     .opt-input {{ width: 1fr; }}
     #skip-row {{ height: 3; margin-top: 1; }}
     #skip-label {{ margin-top: 1; color: {FG}; }}
+    #reduce-skip-row {{ height: 3; }}
+    #reduce-skip-label {{ margin-top: 1; color: {FG}; }}
 
     /* run bar */
     #runbar {{
@@ -952,6 +1289,7 @@ class DataSamplerApp(App):
     }}
     #report-actions {{ height: 3; padding: 0 2; }}
     #report-actions Button {{ margin-right: 2; }}
+    #save-status {{ margin-top: 1; width: 1fr; }}
 
     Input {{
         background: #151a24;

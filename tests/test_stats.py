@@ -28,6 +28,25 @@ def test_numeric_column_stats(demo_df):
     assert s.top_values == []
 
 
+def test_mode_is_populated_for_every_kind():
+    df = pd.DataFrame(
+        {
+            "num": [1.0, 2.0, 2.0, 3.0, 2.0],
+            "cat": ["a", "b", "b", "b", "c"],
+        }
+    )
+    num = compute_column_stats(df["num"])
+    assert num.kind == "numeric"
+    assert num.mode == 2.0  # most frequent numeric value, kept as a float
+    cat = compute_column_stats(df["cat"])
+    assert cat.mode == "b"  # most frequent category, as a string
+
+
+def test_mode_is_none_for_empty_column():
+    s = compute_column_stats(pd.Series([np.nan, np.nan], name="empty"))
+    assert s.mode is None
+
+
 def test_categorical_column_stats(demo_df):
     s = compute_column_stats(demo_df["region"])
     assert s.kind == "categorical"

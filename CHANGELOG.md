@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.4.1 — 2026-07-24
+
+- **TUI columns table now breaks the single summary cell into separate
+  `mean` / `median` / `mode` / `sd` columns.** Numeric columns fill all four;
+  non-numeric columns show `mode` (their most frequent value) with dashes for
+  the numeric-only stats. `ColumnStats` gained a `mode` field, populated for
+  every column kind by `compute_column_stats`.
+- **Bulk configuration via multi-select on the columns screen.** Ctrl-click
+  toggles individual rows, shift-click selects a contiguous range (keyboard:
+  `space` toggles the cursor row, `x` clears the selection). Any anonymizer
+  choice, stratification-skip, or reduction-skip then applies to every
+  selected column at once; the panel title shows the selection count.
+- **Columns can now be excluded from the PCA reduction from the TUI.** A new
+  “skip from reduction (PCA)” switch (and the `d` key) sets a per-column
+  `skip_reduce` flag that is passed to `reduce_columns(exclude=…)`, so chosen
+  numeric columns pass through the reduction unchanged. The columns table
+  gained a `reduce` column showing each column's candidacy / skip state, and
+  excluded columns are listed in the run report.
+- **Undo / redo for column configuration** (`ctrl+z` / `ctrl+y`), keeping well
+  over the last ten steps. Bursts of edits to one option field coalesce into a
+  single undo step.
+- **File screen: refresh the directory browser** with `ctrl+r` or the new
+  ⟳ refresh button, so files created after launch appear without restarting.
+- **Report screen: save the report + column histograms to a text file** with
+  `ctrl+s` or the 💾 save .txt button; it writes `<sample-name>_report.txt`
+  next to the sample output.
+
 ## v3.4.0 — 2026-07-24
 
 - **Added optional PCA column reduction** (`data_sampler.reduce`): after

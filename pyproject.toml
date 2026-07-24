@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data-sampler"
-version = "3.4.0"
+version = "3.4.1"
 description = "Hand someone data that looks and behaves like your production data, isn't your production data, and provably kept its statistical variety — stratified sampling + consistent anonymization, with a terminal UI."
 readme = "README.md"
 license = { file = "LICENSE" }

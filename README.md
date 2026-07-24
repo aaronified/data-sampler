@@ -65,24 +65,35 @@ data_sampler.run_tui("data.csv")       # pre-load a file
 
 The TUI is a panel-based dashboard (think btop / lazydocker):
 
-1. **File screen** — type a path or pick a file from the directory browser;
-   Excel files take an optional sheet name.
+1. **File screen** — type a path or pick a file from the directory browser
+   (**`ctrl+r`** or the **⟳ refresh** button re-scans the folder so files
+   created since launch show up); Excel files take an optional sheet name.
 2. **Columns screen** — every column with its type, missing %, unique count,
-   distribution sparkline, and summary (modelled after the Data Wrangler
-   VS Code extension). Select a column to see full stats and distribution
-   bars, choose an anonymizer for it, and toggle whether it should be
-   skipped when preserving statistical variety (stratification). Set the
-   sample size, output folder, optional seed, an optional PCA column
-   reduction (`reduce`: N components or a variance target), and run.
+   distribution sparkline, and per-stat **mean / median / mode / sd** columns
+   (modelled after the Data Wrangler VS Code extension). Select a column to
+   see full stats and distribution bars, choose an anonymizer for it, and
+   toggle whether it should be skipped when preserving statistical variety
+   (stratification) or excluded from the PCA reduction. **Multi-select** rows
+   to configure them in bulk: **ctrl-click** toggles individual rows,
+   **shift-click** selects a range (**space** toggles the cursor row from the
+   keyboard, **`x`** clears) — then any anonymizer / skip / reduce choice
+   applies to every selected column at once. **`ctrl+z` / `ctrl+y`** undo and
+   redo column-config changes (at least the last ten steps). Set the sample
+   size, output folder, optional seed, an optional PCA column reduction
+   (`reduce`: N components or a variance target), and run.
 3. **Report screen** — the stratification comparison and anonymization summary
    on the left, and a **column histograms** panel on the right showing every
    column's source-vs-sample distribution (numeric columns share bin edges;
    others use the source's top categories) so you can see at a glance how well
-   the sample preserved each column. The output path is shown too.
+   the sample preserved each column. The output path is shown too, and
+   **`ctrl+s`** (or **💾 save .txt**) writes the report and histograms to a
+   `*_report.txt` beside the sample.
 
-Key bindings: `ctrl+r` run sample, `a` auto-suggest anonymizer types,
-`s` toggle stratification skip,
-`escape` back, `ctrl+q` quit.
+Key bindings — columns screen: `ctrl+r` run sample, `a` auto-suggest
+anonymizer types, `s` toggle stratification skip, `d` toggle reduction skip,
+`space` select row, `x` clear selection, `ctrl+z`/`ctrl+y` undo/redo,
+`escape` back. Report screen: `ctrl+s` save report to text, `n` new file.
+Everywhere: `ctrl+q` quit.
 
 ## CLI (headless)
 
